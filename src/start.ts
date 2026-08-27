@@ -14,6 +14,18 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
     if (error != null && typeof error === "object" && "statusCode" in error) {
       throw error;
     }
+
+    // Server function (API) calls don't send Accept: text/html.
+    // Re-throw for those so TanStack Start serialises the error as JSON,
+    // which React Query catches in onError without crashing the page.
+    // Only convert to HTML for actual browser page/document requests.
+    const { getRequest } = await import("@tanstack/react-start/server");
+    const request = getRequest();
+    const acceptsHtml = request?.headers.get("accept")?.includes("text/html") ?? true;
+    if (!acceptsHtml) {
+      throw error;
+    }
+
     console.error(error);
     return new Response(renderErrorPage(), {
       status: 500,
