@@ -696,7 +696,7 @@ function useCallConnection({
           if (track.kind === "video") {
             const params = sender.getParameters();
             if (!params.encodings) params.encodings = [{}];
-            params.encodings[0].maxBitrate = 800_000;
+            params.encodings[0].maxBitrate = 8000_000;
             sender.setParameters(params).catch(() => null);
           }
         });
