@@ -89,7 +89,7 @@ function Onboarding() {
       }
     }, 400);
     return () => clearTimeout(t);
-  }, [username, checkName]);
+  }, [username]);
 
   const mutation = useMutation({
     mutationFn: async () =>
