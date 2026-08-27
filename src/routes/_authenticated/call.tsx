@@ -16,6 +16,7 @@ import {
   StepForward,
   UserRound,
   Video,
+  PictureInPicture2,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -313,12 +314,22 @@ function CallRoom() {
   }, [localStream]);
 
   const toggleCamera = () => {
-    const tracks = localStream?.getVideoTracks() ?? [];
-    const next = !cameraOn;
-    tracks.forEach((track) => {
-      track.enabled = next;
-    });
-    setCameraOn(next);
+    if (localStream) {
+      localStream.getVideoTracks().forEach((t) => (t.enabled = !cameraOn));
+      setCameraOn(!cameraOn);
+    }
+  };
+
+  const togglePiP = async () => {
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else if (remoteVideoRef.current && document.pictureInPictureEnabled) {
+        await remoteVideoRef.current.requestPictureInPicture();
+      }
+    } catch (err) {
+      toast.error("Picture-in-Picture is not supported or was blocked.");
+    }
   };
 
   const toggleMic = () => {
@@ -565,6 +576,17 @@ function CallRoom() {
               {cameraOn ? "Turn camera off" : "Turn camera on"}
             </span>
           </Button>
+          {status === "matched" && (
+            <Button
+              size="icon"
+              variant="secondary"
+              className="size-12 rounded-full"
+              onClick={togglePiP}
+            >
+              <PictureInPicture2 className="size-5" />
+              <span className="sr-only">Picture in Picture</span>
+            </Button>
+          )}
           {cameraState === "blocked" && (
             <Button
               size="icon"
