@@ -25,6 +25,7 @@ async function getServerEntry(): Promise<ServerEntry> {
 // h3 swallows in-handler throws into a normal 500 Response with body
 // {"unhandled":true,"message":"HTTPError"} — try/catch alone never fires for those.
 async function normalizeCatastrophicSsrResponse(
+  request: Request,
   response: Response,
 ): Promise<Response> {
   if (response.status < 500) return response;
@@ -37,6 +38,18 @@ async function normalizeCatastrophicSsrResponse(
   console.error(
     consumeLastCapturedError() ?? new Error(`h3 swallowed SSR error: ${body}`),
   );
+
+  const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? true;
+  if (!acceptsHtml) {
+    return new Response(
+      JSON.stringify({ error: { message: "Internal Server Error" } }),
+      {
+        status: 500,
+        headers: { "content-type": "application/json" },
+      }
+    );
+  }
+
   return new Response(renderErrorPage(), {
     status: 500,
     headers: { "content-type": "text/html; charset=utf-8" },
@@ -60,9 +73,19 @@ export default {
     try {
       const handler = await getServerEntry();
       const response = await handler.fetch(request, env, ctx);
-      return await normalizeCatastrophicSsrResponse(response);
+      return await normalizeCatastrophicSsrResponse(request, response);
     } catch (error) {
       console.error(error);
+      const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? true;
+      if (!acceptsHtml) {
+        return new Response(
+          JSON.stringify({ error: { message: "Internal Server Error" } }),
+          {
+            status: 500,
+            headers: { "content-type": "application/json" },
+          }
+        );
+      }
       return new Response(renderErrorPage(), {
         status: 500,
         headers: { "content-type": "text/html; charset=utf-8" },
