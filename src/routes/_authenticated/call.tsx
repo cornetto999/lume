@@ -105,10 +105,9 @@ function CallRoom() {
     enabled: !!profile?.profile_completed,
     refetchInterval: (query) => {
       const s = query.state.data?.state;
-      // Keep polling when searching/matched, or when we were searching and
-      // dropped back to idle (stale-search recovery)
-      if (s === "searching" || s === "matched") return 2_500;
-      if (wasSearching && s === "idle") return 2_500;
+      // Realtime handles instant match detection — polling is a safety net only
+      if (s === "searching" || s === "matched") return 1_500;
+      if (wasSearching && s === "idle") return 1_500;
       return false;
     },
   });
@@ -247,6 +246,42 @@ function CallRoom() {
       startMutation.mutate();
     }
   }, [wasSearching, matchState?.state, busy, profile?.profile_completed]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Realtime: instantly detect when our queue entry is marked 'matched'.
+  // The matchmaking_queue table is in the Realtime publication, so we get
+  // a server-push the moment another user's startMatching() claims us —
+  // eliminating the polling delay (was up to 2500ms, now near-zero).
+  useEffect(() => {
+    if (!profile?.id || matchState?.state !== "searching") return;
+
+    const channel = supabase
+      .channel(`queue-watch-${profile.id}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "matchmaking_queue",
+          filter: `user_id=eq.${profile.id}`,
+        },
+        (payload) => {
+          const row = payload.new as { status: string };
+          // Only trigger a refetch if the row just became 'matched'.
+          // The server's getMatchmakingState will then resolve the full state
+          // (session, partner info, etc.) and update the React Query cache.
+          if (row.status === "matched") {
+            void queryClient.invalidateQueries({
+              queryKey: ["matchmaking-state"],
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [profile?.id, matchState?.state, queryClient]);
 
   useEffect(() => {
     let alive = true;

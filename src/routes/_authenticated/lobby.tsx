@@ -79,7 +79,7 @@ function Lobby() {
     queryFn: () => loadMatchmaking(),
     enabled: !!profile?.profile_completed,
     refetchInterval: (query) =>
-      query.state.data?.state === "searching" ? 2_500 : false,
+      query.state.data?.state === "searching" ? 1_500 : false,
   });
 
   const setMatchState = (state: NonNullable<typeof matchState>) => {
@@ -149,6 +149,39 @@ function Lobby() {
     const interval = window.setInterval(beat, 45_000);
     return () => window.clearInterval(interval);
   }, [profile?.profile_completed, matchState?.state, sendHeartbeat]);
+
+  // Realtime: instantly detect when our queue entry is marked 'matched'
+  // so we can navigate to /call the moment the server pairs us up,
+  // instead of waiting up to 1500ms for the next poll tick.
+  useEffect(() => {
+    const userId = profile?.id;
+    if (!userId || matchState?.state !== "searching") return;
+
+    const channel = supabase
+      .channel(`lobby-queue-watch-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "UPDATE",
+          schema: "public",
+          table: "matchmaking_queue",
+          filter: `user_id=eq.${userId}`,
+        },
+        (payload) => {
+          const row = payload.new as { status: string };
+          if (row.status === "matched") {
+            void queryClient.invalidateQueries({
+              queryKey: ["matchmaking-state"],
+            });
+          }
+        },
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [profile?.id, matchState?.state, queryClient]);
 
   const signOut = async () => {
     await sendHeartbeat({ data: { presence: "offline" } }).catch(() => null);
