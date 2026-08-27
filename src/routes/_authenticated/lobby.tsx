@@ -150,13 +150,13 @@ function Lobby() {
     }
 
     const beat = () => {
-      void sendHeartbeat({ data: { presence: "online" } });
+      void heartbeat({ data: { presence: "online" } });
     };
 
     beat();
     const interval = window.setInterval(beat, 45_000);
     return () => window.clearInterval(interval);
-  }, [profile?.profile_completed, matchState?.state, sendHeartbeat]);
+  }, [profile?.profile_completed, matchState?.state, heartbeat]);
 
   // Realtime: instantly detect when our queue entry is marked 'matched'
   // so we can navigate to /call the moment the server pairs us up,
@@ -192,7 +192,7 @@ function Lobby() {
   }, [profile?.id, matchState?.state, queryClient]);
 
   const signOut = async () => {
-    await sendHeartbeat({ data: { presence: "offline" } }).catch(() => null);
+    await heartbeat({ data: { presence: "offline" } }).catch(() => null);
     await supabase.auth.signOut();
     navigate({ to: "/", replace: true });
   };
