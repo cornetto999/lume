@@ -210,12 +210,7 @@ async function isCandidateAvailable(
 ) {
   const now = new Date().toISOString();
 
-  const [profileResult, blockedResult, cooldownResult] = await Promise.all([
-    supabaseAdmin
-      .from("profiles")
-      .select("profile_completed, account_status")
-      .eq("id", candidateUserId)
-      .maybeSingle(),
+  const [blockedResult, cooldownResult] = await Promise.all([
     supabaseAdmin.rpc("is_blocked_pair", {
       _a: currentUserId,
       _b: candidateUserId,
@@ -229,13 +224,10 @@ async function isCandidateAvailable(
       .limit(1),
   ]);
 
-  if (profileResult.error) throw new Error(profileResult.error.message);
   if (blockedResult.error) throw new Error(blockedResult.error.message);
   if (cooldownResult.error) throw new Error(cooldownResult.error.message);
 
   return (
-    profileResult.data?.profile_completed === true &&
-    profileResult.data.account_status === "active" &&
     blockedResult.data !== true &&
     (cooldownResult.data ?? []).length === 0
   );
@@ -246,13 +238,37 @@ async function tryCreateMatch(
   userId: string,
 ): Promise<MatchmakingState> {
   const staleCutoff = new Date(Date.now() - SEARCH_STALE_MS).toISOString();
+  
+  // Fast path: Atomic Matchmaking RPC (Requires Migration)
+  // We try this first. If the RPC doesn't exist, we fallback to the old loop.
+  const { data: atomicSession, error: rpcError } = await supabaseAdmin.rpc(
+    // @ts-ignore: atomic_matchmaking might not be in the generated types yet
+    "atomic_matchmaking",
+    {
+      p_user_id: userId,
+      p_stale_cutoff: staleCutoff,
+    }
+  );
+
+  if (!rpcError && atomicSession) {
+    return hydrateMatchState(supabaseAdmin, userId);
+  }
+
+  // Fallback path: Manual matching loop
   const { data: candidates, error } = await supabaseAdmin
     .from("matchmaking_queue")
-    .select("*")
+    .select(`
+      *,
+      profile:profiles!inner(profile_completed, account_status)
+    `)
     .eq("status", "searching")
     .is("session_id", null)
     .neq("user_id", userId)
     .gte("heartbeat_at", staleCutoff)
+    // @ts-ignore: PostgREST embedded filters are dynamically typed
+    .eq("profile.profile_completed", true)
+    // @ts-ignore
+    .eq("profile.account_status", "active")
     .order("joined_at", { ascending: true })
     .limit(8);
 

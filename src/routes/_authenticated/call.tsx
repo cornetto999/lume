@@ -19,6 +19,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
+import { useCamera } from "@/contexts/CameraContext";
 import { supabase } from "@/integrations/supabase/client";
 import { getMyProfile } from "@/lib/profile.functions";
 import {
@@ -79,9 +80,11 @@ function CallRoom() {
   const queryClient = useQueryClient();
   const videoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const [cameraState, setCameraState] = useState<CameraState>("starting");
-  const [cameraError, setCameraError] = useState("");
+  const { localStream, cameraError, isReady, startCamera } = useCamera();
+  const cameraState: CameraState = isReady 
+    ? (cameraError ? "blocked" : "ready") 
+    : "starting";
+
   const [cameraOn, setCameraOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
 
@@ -144,7 +147,7 @@ function CallRoom() {
       profile?.username || profile?.display_name || profile?.id || "member",
     partnerId,
     isOfferer,
-    localStream: streamRef.current,
+    localStream: localStream,
     mediaReady: cameraState !== "starting",
     remoteVideoRef,
   });
@@ -297,61 +300,20 @@ function CallRoom() {
   }, [profile?.id, matchState?.state, queryClient]);
 
   useEffect(() => {
-    let alive = true;
-
-    async function startCamera() {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        setCameraState("unsupported");
-        return;
-      }
-
-      setCameraState("starting");
-      setCameraError("");
-
-      try {
-        const stream = await navigator.mediaDevices.getUserMedia({
-          video: {
-            width: { ideal: 1280 },
-            height: { ideal: 720 },
-            facingMode: "user",
-          },
-          audio: true,
-        });
-
-        if (!alive) {
-          stream.getTracks().forEach((track) => track.stop());
-          return;
-        }
-
-        streamRef.current = stream;
-        if (videoRef.current) {
-          videoRef.current.srcObject = stream;
-        }
-        setCameraOn(stream.getVideoTracks().some((track) => track.enabled));
-        setMicOn(stream.getAudioTracks().some((track) => track.enabled));
-        setCameraState("ready");
-      } catch (error) {
-        if (!alive) return;
-        const message =
-          error instanceof Error
-            ? error.message
-            : "Camera permission was not granted.";
-        setCameraError(message);
-        setCameraState("blocked");
-      }
+    // If not ready, tell context to start it (if it isn't already)
+    if (!isReady) {
+      void startCamera();
     }
+  }, [isReady, startCamera]);
 
-    void startCamera();
-
-    return () => {
-      alive = false;
-      streamRef.current?.getTracks().forEach((track) => track.stop());
-      streamRef.current = null;
-    };
-  }, []);
+  useEffect(() => {
+    if (videoRef.current && localStream) {
+      videoRef.current.srcObject = localStream;
+    }
+  }, [localStream]);
 
   const toggleCamera = () => {
-    const tracks = streamRef.current?.getVideoTracks() ?? [];
+    const tracks = localStream?.getVideoTracks() ?? [];
     const next = !cameraOn;
     tracks.forEach((track) => {
       track.enabled = next;
@@ -360,7 +322,7 @@ function CallRoom() {
   };
 
   const toggleMic = () => {
-    const tracks = streamRef.current?.getAudioTracks() ?? [];
+    const tracks = localStream?.getAudioTracks() ?? [];
     const next = !micOn;
     tracks.forEach((track) => {
       track.enabled = next;
@@ -730,7 +692,13 @@ function useCallConnection({
     try {
       if (localStream?.getTracks().length) {
         localStream.getTracks().forEach((track) => {
-          peer.addTrack(track, localStream);
+          const sender = peer.addTrack(track, localStream);
+          if (track.kind === "video") {
+            const params = sender.getParameters();
+            if (!params.encodings) params.encodings = [{}];
+            params.encodings[0].maxBitrate = 800_000;
+            sender.setParameters(params).catch(() => null);
+          }
         });
       } else {
         peer.addTransceiver("video", { direction: "recvonly" });

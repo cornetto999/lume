@@ -23,6 +23,7 @@ import {
   getMyProfile,
   heartbeat,
 } from "@/lib/profile.functions";
+import { useCamera } from "@/contexts/CameraContext";
 import {
   cancelMatching,
   endCurrentMatch,
@@ -48,6 +49,7 @@ export const Route = createFileRoute("/_authenticated/lobby")({
 function Lobby() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
+  const { startCamera } = useCamera();
               
   const {
     data: profile,
@@ -142,6 +144,12 @@ function Lobby() {
       navigate({ to: "/call" });
     }
   }, [matchState?.state, navigate]);
+
+  useEffect(() => {
+    if (profile?.profile_completed) {
+      void startCamera();
+    }
+  }, [profile?.profile_completed, startCamera]);
 
   useEffect(() => {
     if (!profile?.profile_completed) return;
