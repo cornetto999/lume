@@ -74,10 +74,16 @@ function Lobby() {
     refetchInterval: 30_000,
   });
 
-  const { data: matchState, isLoading: matchLoading } = useQuery({
+  const {
+    data: matchState,
+    isLoading: matchLoading,
+    error: matchError,
+  } = useQuery({
     queryKey: ["matchmaking-state"],
     queryFn: () => loadMatchmaking(),
     enabled: !!profile?.profile_completed,
+    retry: 1,
+    throwOnError: false,
     refetchInterval: (query) =>
       query.state.data?.state === "searching" ? 1_500 : false,
   });
@@ -128,6 +134,16 @@ function Lobby() {
       navigate({ to: "/onboarding", replace: true });
     }
   }, [profile, navigate]);
+
+  // Show a toast when the matchmaking poll errors rather than crashing the lobby.
+  useEffect(() => {
+    if (!matchError) return;
+    const msg =
+      matchError instanceof Error
+        ? matchError.message
+        : "Could not check match status.";
+    toast.error(msg);
+  }, [matchError]);
 
   useEffect(() => {
     if (matchState?.state === "matched") {

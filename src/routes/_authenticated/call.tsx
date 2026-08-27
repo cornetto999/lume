@@ -95,14 +95,22 @@ function CallRoom() {
   const { data: profile, isLoading: profileLoading } = useQuery({
     queryKey: ["my-profile"],
     queryFn: () => loadProfile(),
+    retry: 1,
+    throwOnError: false,
   });
 
   const [wasSearching, setWasSearching] = useState(false);
 
-  const { data: matchState, isLoading: matchLoading } = useQuery({
+  const {
+    data: matchState,
+    isLoading: matchLoading,
+    error: matchError,
+  } = useQuery({
     queryKey: ["matchmaking-state"],
     queryFn: () => loadMatchmaking(),
     enabled: !!profile?.profile_completed,
+    retry: 1,
+    throwOnError: false,
     refetchInterval: (query) => {
       const s = query.state.data?.state;
       // Realtime handles instant match detection — polling is a safety net only
@@ -224,6 +232,17 @@ function CallRoom() {
       navigate({ to: "/onboarding", replace: true });
     }
   }, [profile, navigate]);
+
+  // Show a recoverable toast when the matchmaking poll errors (e.g. expired
+  // session, transient server error) instead of crashing the whole page.
+  useEffect(() => {
+    if (!matchError) return;
+    const msg =
+      matchError instanceof Error
+        ? matchError.message
+        : "Could not check match status.";
+    toast.error(msg);
+  }, [matchError]);
 
   // Track whether we've ever been in searching/matched state this session
   useEffect(() => {
