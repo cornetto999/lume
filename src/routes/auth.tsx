@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { Loader2 } from "lucide-react";
+import { Loader2, Eye, EyeOff } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { getGoogleSignInUrl, isGoogleSignInEnabled } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -37,6 +37,7 @@ function AuthPage() {
   const [busy, setBusy] = useState(false);
   const [mode, setMode] = useState<AuthMode>("signin");
   const [googleUrl, setGoogleUrl] = useState("");
+  const [showPassword, setShowPassword] = useState(false);
 
   useEffect(() => {
     const requestedMode = new URLSearchParams(window.location.search).get(
@@ -162,17 +163,33 @@ function AuthPage() {
               </div>
               <div className="space-y-2">
                 <Label htmlFor={`${mode}-password`}>Password</Label>
-                <Input
-                  id={`${mode}-password`}
-                  type="password"
-                  autoComplete={
-                    mode === "signin" ? "current-password" : "new-password"
-                  }
-                  value={password}
-                  onChange={(e) => setPassword(e.target.value)}
-                  placeholder="At least 8 characters"
-                  className="h-12 rounded-xl"
-                />
+                <div className="relative">
+                  <Input
+                    id={`${mode}-password`}
+                    type={showPassword ? "text" : "password"}
+                    autoComplete={
+                      mode === "signin" ? "current-password" : "new-password"
+                    }
+                    value={password}
+                    onChange={(e) => setPassword(e.target.value)}
+                    placeholder="At least 8 characters"
+                    className="h-12 rounded-xl pr-10"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowPassword(!showPassword)}
+                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground focus:outline-none"
+                  >
+                    {showPassword ? (
+                      <EyeOff className="size-5" />
+                    ) : (
+                      <Eye className="size-5" />
+                    )}
+                    <span className="sr-only">
+                      {showPassword ? "Hide password" : "Show password"}
+                    </span>
+                  </button>
+                </div>
               </div>
               <Button
                 onClick={() => submit(mode)}
