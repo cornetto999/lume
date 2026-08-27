@@ -81,5 +81,13 @@ let _supabaseAdmin: Promise<SupabaseAdminClient> | undefined;
 // Load inside server handlers: const { getSupabaseAdmin } = await import("@/integrations/supabase/client.server");
 // Top-level import is safe only in other .server.ts modules - route files and *.functions.ts ship to the client bundle.
 export function getSupabaseAdmin(): Promise<SupabaseAdminClient> {
-  return (_supabaseAdmin ??= createSupabaseAdminClient());
+  if (!_supabaseAdmin) {
+    _supabaseAdmin = createSupabaseAdminClient().catch((err) => {
+      // Clear the cached rejected promise so the next request retries instead
+      // of permanently failing until the serverless lambda restarts.
+      _supabaseAdmin = undefined;
+      throw err;
+    });
+  }
+  return _supabaseAdmin;
 }
