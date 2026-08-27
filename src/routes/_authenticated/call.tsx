@@ -97,15 +97,20 @@ function CallRoom() {
     queryFn: () => loadProfile(),
   });
 
+  const [wasSearching, setWasSearching] = useState(false);
+
   const { data: matchState, isLoading: matchLoading } = useQuery({
     queryKey: ["matchmaking-state"],
     queryFn: () => loadMatchmaking(),
     enabled: !!profile?.profile_completed,
-    refetchInterval: (query) =>
-      query.state.data?.state === "searching" ||
-      query.state.data?.state === "matched"
-        ? 2_500
-        : false,
+    refetchInterval: (query) => {
+      const s = query.state.data?.state;
+      // Keep polling when searching/matched, or when we were searching and
+      // dropped back to idle (stale-search recovery)
+      if (s === "searching" || s === "matched") return 2_500;
+      if (wasSearching && s === "idle") return 2_500;
+      return false;
+    },
   });
 
   const status = matchState?.state ?? "idle";
@@ -165,6 +170,7 @@ function CallRoom() {
   const cancelMutation = useMutation({
     mutationFn: () => cancelSearch(),
     onSuccess: (state) => {
+      setWasSearching(false);
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
@@ -175,6 +181,7 @@ function CallRoom() {
   const endMutation = useMutation({
     mutationFn: () => endMatch(),
     onSuccess: (state) => {
+      setWasSearching(false);
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
@@ -185,6 +192,7 @@ function CallRoom() {
   const skipMutation = useMutation({
     mutationFn: () => endMatch(),
     onSuccess: (state) => {
+      setWasSearching(false);
       setMatchState(state);
       toast.info("Match skipped.");
     },
@@ -217,6 +225,28 @@ function CallRoom() {
       navigate({ to: "/onboarding", replace: true });
     }
   }, [profile, navigate]);
+
+  // Track whether we've ever been in searching/matched state this session
+  useEffect(() => {
+    if (matchState?.state === "searching" || matchState?.state === "matched") {
+      setWasSearching(true);
+    }
+  }, [matchState?.state]);
+
+  // Auto-restart matching when the search goes stale and drops back to idle.
+  // This prevents the user from getting stuck on the call page with an idle
+  // state after a 90-second stale search timeout.
+  useEffect(() => {
+    if (
+      wasSearching &&
+      matchState?.state === "idle" &&
+      !busy &&
+      !!profile?.profile_completed
+    ) {
+      setWasSearching(false);
+      startMutation.mutate();
+    }
+  }, [wasSearching, matchState?.state, busy, profile?.profile_completed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     let alive = true;
