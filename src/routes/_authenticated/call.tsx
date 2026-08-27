@@ -423,6 +423,7 @@ function CallRoom() {
               muted
               playsInline
               className="absolute inset-0 h-full w-full object-cover"
+              style={{ transform: "scaleX(-1)" }}
             />
             {cameraState !== "ready" && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 text-center">
