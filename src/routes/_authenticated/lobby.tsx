@@ -1,7 +1,6 @@
 import { useEffect } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
 import {
   Bell,
   CheckCircle2,
@@ -49,27 +48,20 @@ export const Route = createFileRoute("/_authenticated/lobby")({
 function Lobby() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const loadProfile = useServerFn(getMyProfile);
-  const loadSnapshot = useServerFn(getLobbySnapshot);
-  const sendHeartbeat = useServerFn(heartbeat);
-  const loadMatchmaking = useServerFn(getMatchmakingState);
-  const beginMatching = useServerFn(startMatching);
-  const cancelSearch = useServerFn(cancelMatching);
-  const endMatch = useServerFn(endCurrentMatch);
-
+              
   const {
     data: profile,
     error: profileError,
     isLoading: profileLoading,
   } = useQuery({
     queryKey: ["my-profile"],
-    queryFn: () => loadProfile(),
+    queryFn: () => getMyProfile(),
     retry: false,
   });
 
   const { data: snapshot } = useQuery({
     queryKey: ["lobby-snapshot"],
-    queryFn: () => loadSnapshot(),
+    queryFn: () => getLobbySnapshot(),
     enabled: !!profile?.profile_completed,
     refetchInterval: 30_000,
   });
@@ -80,7 +72,7 @@ function Lobby() {
     error: matchError,
   } = useQuery({
     queryKey: ["matchmaking-state"],
-    queryFn: () => loadMatchmaking(),
+    queryFn: () => getMatchmakingState(),
     enabled: !!profile?.profile_completed,
     retry: 1,
     throwOnError: false,
@@ -94,7 +86,7 @@ function Lobby() {
   };
 
   const startMutation = useMutation({
-    mutationFn: () => beginMatching(),
+    mutationFn: () => startMatching(),
     onSuccess: (state) => {
       setMatchState(state);
       toast[state.state === "matched" ? "success" : "info"](
@@ -109,7 +101,7 @@ function Lobby() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => cancelSearch(),
+    mutationFn: () => cancelMatching(),
     onSuccess: (state) => {
       setMatchState(state);
       toast.info("Search cancelled.");
@@ -119,7 +111,7 @@ function Lobby() {
   });
 
   const endMutation = useMutation({
-    mutationFn: () => endMatch(),
+    mutationFn: () => endCurrentMatch(),
     onSuccess: (state) => {
       setMatchState(state);
       toast.info("Match ended.");

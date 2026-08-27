@@ -1,7 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
 import {
   Camera,
   CameraOff,
@@ -86,15 +85,10 @@ function CallRoom() {
   const [cameraOn, setCameraOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
 
-  const loadProfile = useServerFn(getMyProfile);
-  const loadMatchmaking = useServerFn(getMatchmakingState);
-  const beginMatching = useServerFn(startMatching);
-  const cancelSearch = useServerFn(cancelMatching);
-  const endMatch = useServerFn(endCurrentMatch);
-
+          
   const { data: profile, isLoading: profileLoading } = useQuery({
     queryKey: ["my-profile"],
-    queryFn: () => loadProfile(),
+    queryFn: () => getMyProfile(),
     retry: 1,
     throwOnError: false,
   });
@@ -107,7 +101,7 @@ function CallRoom() {
     error: matchError,
   } = useQuery({
     queryKey: ["matchmaking-state"],
-    queryFn: () => loadMatchmaking(),
+    queryFn: () => getMatchmakingState(),
     enabled: !!profile?.profile_completed,
     retry: 1,
     throwOnError: false,
@@ -133,8 +127,8 @@ function CallRoom() {
   const partnerName =
     matchState?.state === "matched"
       ? matchState.partner?.display_name ||
-        matchState.partner?.username ||
-        "Your match"
+      matchState.partner?.username ||
+      "Your match"
       : "Finding match";
   const roomName = activeSession
     ? activeSession.room_name.replace(/^lume-/, "").slice(0, 8)
@@ -161,7 +155,7 @@ function CallRoom() {
   };
 
   const startMutation = useMutation({
-    mutationFn: () => beginMatching(),
+    mutationFn: () => startMatching(),
     onSuccess: (state) => {
       setMatchState(state);
       toast[state.state === "matched" ? "success" : "info"](
@@ -175,7 +169,7 @@ function CallRoom() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => cancelSearch(),
+    mutationFn: () => cancelMatching(),
     onSuccess: (state) => {
       setWasSearching(false);
       setMatchState(state);
@@ -186,7 +180,7 @@ function CallRoom() {
   });
 
   const endMutation = useMutation({
-    mutationFn: () => endMatch(),
+    mutationFn: () => endCurrentMatch(),
     onSuccess: (state) => {
       setWasSearching(false);
       setMatchState(state);
@@ -197,7 +191,7 @@ function CallRoom() {
   });
 
   const skipMutation = useMutation({
-    mutationFn: () => endMatch(),
+    mutationFn: () => endCurrentMatch(),
     onSuccess: (state) => {
       setWasSearching(false);
       setMatchState(state);
@@ -210,9 +204,9 @@ function CallRoom() {
   const nextMutation = useMutation({
     mutationFn: async () => {
       if (matchState?.state === "matched") {
-        await endMatch();
+        await endCurrentMatch();
       }
-      return beginMatching();
+      return startMatching();
     },
     onSuccess: (state) => {
       setMatchState(state);
@@ -264,7 +258,7 @@ function CallRoom() {
       setWasSearching(false);
       startMutation.mutate();
     }
-  }, [wasSearching, matchState?.state, busy, profile?.profile_completed]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [wasSearching, matchState?.state, profile?.profile_completed]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Realtime: instantly detect when our queue entry is marked 'matched'.
   // The matchmaking_queue table is in the Realtime publication, so we get
@@ -538,11 +532,10 @@ function CallRoom() {
             </div>
             {status === "matched" && (
               <div
-                className={`absolute right-4 top-4 flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium ${
-                  rtcStatus === "live"
+                className={`absolute right-4 top-4 flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium ${rtcStatus === "live"
                     ? "bg-success/15 text-success"
                     : "bg-background/80 text-muted-foreground"
-                }`}
+                  }`}
               >
                 {rtcStatus === "live" ? (
                   <Radio className="size-3.5" />

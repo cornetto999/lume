@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
-import { useServerFn } from "@tanstack/react-start";
 import { toast } from "sonner";
 import { Check, Loader2 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -48,13 +47,10 @@ export const Route = createFileRoute("/_authenticated/onboarding")({
 
 function Onboarding() {
   const navigate = useNavigate();
-  const loadProfile = useServerFn(getMyProfile);
-  const checkName = useServerFn(checkUsername);
-  const save = useServerFn(completeProfile);
-
+      
   const { data: profile } = useQuery({
     queryKey: ["my-profile"],
-    queryFn: () => loadProfile(),
+    queryFn: () => getMyProfile(),
   });
 
   const [displayName, setDisplayName] = useState("");
@@ -84,7 +80,7 @@ function Onboarding() {
     setNameState("checking");
     const t = setTimeout(async () => {
       try {
-        const res = await checkName({ data: { username: value } });
+        const res = await checkUsername({ data: { username: value } });
         setNameState(
           res.available ? "ok" : res.reason === "invalid" ? "invalid" : "taken",
         );
@@ -97,7 +93,7 @@ function Onboarding() {
 
   const mutation = useMutation({
     mutationFn: async () =>
-      save({
+      completeProfile({
         data: {
           display_name: displayName.trim(),
           username: username.trim().toLowerCase(),
