@@ -11,6 +11,7 @@ import {
   Clock3,
   Loader2,
   LogOut,
+  MessageCircle,
   MessageCircleQuestion,
   Mic,
   MicOff,
@@ -24,6 +25,8 @@ import {
   UserRound,
   Video,
   PictureInPicture2,
+  X,
+  SendHorizontal,
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
@@ -57,6 +60,7 @@ import {
   type MatchmakingState,
 } from "@/lib/matchmaking.functions";
 import { fileSafetyReport } from "@/lib/safety.functions";
+import { cn } from "@/lib/utils";
 import {
   DEFAULT_MATCH_PREFERENCES,
   REPORT_REASON_LABELS,
@@ -71,9 +75,17 @@ type RtcSignalPayload = {
   sessionId: string;
   from: string;
   to: string;
-  type: "ready" | "offer" | "answer" | "candidate" | "leave" | "intro_continue";
+  type:
+    | "ready"
+    | "offer"
+    | "answer"
+    | "candidate"
+    | "leave"
+    | "intro_continue"
+    | "chat";
   description?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
+  message?: string;
 };
 
 const SIGNAL_EVENT = "webrtc_signal";
@@ -104,6 +116,7 @@ function isSignalPayload(value: unknown): value is RtcSignalPayload {
       "candidate",
       "leave",
       "intro_continue",
+      "chat",
     ].includes(payload.type ?? "")
   );
 }
@@ -143,6 +156,8 @@ function CallRoom() {
   const [reportReason, setReportReason] = useState<ReportReason>("harassment");
   const [reportDetails, setReportDetails] = useState("");
   const [blockAfterReport, setBlockAfterReport] = useState(false);
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatInput, setChatInput] = useState("");
 
   const { data: profile, isLoading: profileLoading } = useQuery({
     queryKey: ["my-profile"],
@@ -202,6 +217,8 @@ function CallRoom() {
     error: rtcError,
     hasRemoteVideo,
     partnerIntroReady,
+    chatMessages,
+    sendChatMessage,
     sendIntroContinue,
   } = useCallConnection({
     sessionId: activeSession?.id ?? null,
@@ -359,6 +376,8 @@ function CallRoom() {
     setShieldOpen(false);
     setReportDetails("");
     setBlockAfterReport(false);
+    setChatOpen(false);
+    setChatInput("");
   }, [activeSession?.id]);
 
   // Realtime: instantly detect when our queue entry is marked 'matched'.
@@ -878,6 +897,16 @@ function CallRoom() {
             </Button>
           )}
           <Button
+            size="icon"
+            variant={chatOpen ? "default" : "secondary"}
+            className="size-12 rounded-full"
+            disabled={status !== "matched"}
+            onClick={() => setChatOpen((o) => !o)}
+          >
+            <MessageCircle className="size-5" />
+            <span className="sr-only">Live Chat</span>
+          </Button>
+          <Button
             variant="destructive"
             className="h-12 rounded-full px-4"
             disabled={busy}
@@ -989,6 +1018,71 @@ function CallRoom() {
             </DialogFooter>
           </DialogContent>
         </Dialog>
+
+        {chatOpen && (
+          <div className="fixed bottom-24 right-4 z-50 flex h-[420px] w-80 max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-2xl border border-border bg-surface/95 shadow-2xl backdrop-blur sm:right-8 sm:bottom-28">
+            <div className="flex items-center justify-between border-b border-border bg-muted/30 p-3">
+              <h3 className="font-semibold text-foreground">Chat</h3>
+              <Button
+                size="icon"
+                variant="ghost"
+                className="size-8"
+                onClick={() => setChatOpen(false)}
+              >
+                <X className="size-4" />
+              </Button>
+            </div>
+            <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
+              {chatMessages.length === 0 ? (
+                <p className="mt-4 text-center text-sm text-muted-foreground">
+                  No messages yet. Send a message to start!
+                </p>
+              ) : (
+                chatMessages.map((msg, i) => {
+                  const isMe = msg.senderId === profile?.id;
+                  return (
+                    <div
+                      key={i}
+                      className={cn(
+                        "max-w-[85%] rounded-2xl px-3 py-2 text-sm",
+                        isMe
+                          ? "self-end rounded-br-sm bg-primary text-primary-foreground"
+                          : "self-start rounded-bl-sm bg-secondary text-secondary-foreground",
+                      )}
+                    >
+                      {msg.text}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+            <form
+              className="flex gap-2 border-t border-border bg-muted/20 p-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (!chatInput.trim()) return;
+                sendChatMessage(chatInput.trim());
+                setChatInput("");
+              }}
+            >
+              <input
+                type="text"
+                className="flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                placeholder="Type a message..."
+                value={chatInput}
+                onChange={(e) => setChatInput(e.target.value)}
+              />
+              <Button
+                type="submit"
+                size="icon"
+                disabled={!chatInput.trim()}
+                className="size-10 shrink-0 rounded-xl"
+              >
+                <SendHorizontal className="size-4" />
+              </Button>
+            </form>
+          </div>
+        )}
       </div>
     </main>
   );
@@ -1017,7 +1111,11 @@ function useCallConnection({
   const [error, setError] = useState("");
   const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
   const [partnerIntroReady, setPartnerIntroReady] = useState(false);
+  const [chatMessages, setChatMessages] = useState<
+    Array<{ senderId: string; text: string; timestamp: number }>
+  >([]);
   const sendIntroContinueRef = useRef<(() => Promise<void>) | null>(null);
+  const sendChatRef = useRef<((text: string) => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (!sessionId || !currentUserId || !partnerId) {
@@ -1025,7 +1123,9 @@ function useCallConnection({
       setError("");
       setHasRemoteVideo(false);
       setPartnerIntroReady(false);
+      setChatMessages([]);
       sendIntroContinueRef.current = null;
+      sendChatRef.current = null;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       return;
     }
@@ -1076,6 +1176,13 @@ function useCallConnection({
       });
     };
     sendIntroContinueRef.current = () => sendSignal({ type: "intro_continue" });
+    sendChatRef.current = async (text: string) => {
+      await sendSignal({ type: "chat", message: text });
+      setChatMessages((prev) => [
+        ...prev,
+        { senderId: currentUserId, text, timestamp: Date.now() },
+      ]);
+    };
 
     const flushQueuedCandidates = async () => {
       while (queuedCandidates.length > 0 && peer.remoteDescription) {
@@ -1198,6 +1305,18 @@ function useCallConnection({
         try {
           if (payload.type === "leave") {
             setStatus("disconnected");
+            return;
+          }
+
+          if (payload.type === "chat" && payload.message) {
+            setChatMessages((prev) => [
+              ...prev,
+              {
+                senderId: payload.from,
+                text: payload.message!,
+                timestamp: Date.now(),
+              },
+            ]);
             return;
           }
 
@@ -1337,6 +1456,9 @@ function useCallConnection({
     error,
     hasRemoteVideo,
     partnerIntroReady,
+    chatMessages,
+    sendChatMessage: (text: string) =>
+      sendChatRef.current?.(text) ?? Promise.resolve(),
     sendIntroContinue: () =>
       sendIntroContinueRef.current?.() ?? Promise.resolve(),
   };
