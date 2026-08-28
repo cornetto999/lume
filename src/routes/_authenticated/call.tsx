@@ -588,15 +588,15 @@ function CallRoom() {
             />
             {cameraState !== "ready" && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 text-center">
-                <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/15">
+                <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/15">
                   {cameraState === "starting" ? (
-                    <Loader2 className="size-6 animate-spin text-primary" />
+                    <Loader2 className="size-5 animate-spin text-primary" />
                   ) : (
-                    <CameraOff className="size-6 text-primary" />
+                    <CameraOff className="size-5 text-primary" />
                   )}
                 </div>
                 <div>
-                  <p className="font-semibold text-foreground">
+                  <p className="text-sm font-medium text-foreground">
                     {cameraState === "unsupported"
                       ? "Camera unavailable"
                       : cameraState === "blocked"
@@ -606,7 +606,7 @@ function CallRoom() {
                           : "Starting camera"}
                   </p>
                   {cameraError && (
-                    <p className="mt-1 max-w-xs text-sm text-muted-foreground">
+                    <p className="mt-0.5 max-w-xs text-xs text-muted-foreground">
                       {cameraError}
                     </p>
                   )}
@@ -631,25 +631,25 @@ function CallRoom() {
               className="absolute inset-0 h-full w-full object-cover"
             />
             {!hasRemoteVideo && (
-              <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-6 text-center">
-                <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/15">
+              <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
+                <div className="flex size-12 items-center justify-center rounded-2xl bg-primary/15">
                   {status === "matched" ? (
                     rtcStatus === "failed" || rtcStatus === "disconnected" ? (
-                      <CameraOff className="size-6 text-primary" />
+                      <CameraOff className="size-5 text-primary" />
                     ) : (
-                      <UserRound className="size-6 text-primary" />
+                      <UserRound className="size-5 text-primary" />
                     )
                   ) : status === "searching" ? (
-                    <Loader2 className="size-6 animate-spin text-primary" />
+                    <Loader2 className="size-5 animate-spin text-primary" />
                   ) : (
-                    <Search className="size-6 text-primary" />
+                    <Search className="size-5 text-primary" />
                   )}
                 </div>
                 <div>
-                  <p className="text-lg font-semibold text-foreground">
+                  <p className="text-sm font-medium text-foreground">
                     {partnerName}
                   </p>
-                  <p className="mt-1 text-sm text-muted-foreground">
+                  <p className="mt-0.5 text-xs text-muted-foreground">
                     {status === "matched" && roomName
                       ? `Room ${roomName}`
                       : matchStatusText}
