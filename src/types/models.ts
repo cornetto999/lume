@@ -89,6 +89,8 @@ export const REPORT_REASON_LABELS: Record<ReportReason, string> = {
 export const INTEREST_OPTIONS = [
   "Music",
   "Gaming",
+  "Study",
+  "Chill",
   "Travel",
   "Film",
   "Fitness",
@@ -99,4 +101,51 @@ export const INTEREST_OPTIONS = [
   "Sports",
   "Photography",
   "Languages",
+  "Anime",
+  "Developers",
+  "Friendship",
 ] as const;
+
+export const VIBE_OPTIONS = [
+  "Gaming",
+  "Music",
+  "Study",
+  "Chill",
+  "Tech",
+  "Friendship",
+] as const;
+
+export type VibeOption = (typeof VIBE_OPTIONS)[number];
+
+export const LANGUAGE_OPTIONS = [
+  { value: "Any", label: "Any language" },
+  { value: "English", label: "English" },
+  { value: "Filipino", label: "Filipino" },
+  { value: "Cebuano", label: "Cebuano" },
+  { value: "Spanish", label: "Spanish" },
+  { value: "Japanese", label: "Japanese" },
+  { value: "Korean", label: "Korean" },
+  { value: "Mandarin", label: "Mandarin" },
+  { value: "Hindi", label: "Hindi" },
+  { value: "Arabic", label: "Arabic" },
+  { value: "French", label: "French" },
+  { value: "German", label: "German" },
+] as const;
+
+export const COUNTRY_MATCH_MODES = ["global", "same_country"] as const;
+
+export type CountryMatchMode = (typeof COUNTRY_MATCH_MODES)[number];
+
+export type MatchPreferences = {
+  vibe: VibeOption;
+  topics: string[];
+  language: string;
+  countryMode: CountryMatchMode;
+};
+
+export const DEFAULT_MATCH_PREFERENCES: MatchPreferences = {
+  vibe: "Chill",
+  topics: [],
+  language: "Any",
+  countryMode: "global",
+};

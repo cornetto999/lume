@@ -1,12 +1,26 @@
 import { createServerFn } from "@tanstack/react-start";
 import type { SupabaseClient } from "@supabase/supabase-js";
+import { z } from "zod";
 import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 import type { Database, Tables } from "@/integrations/supabase/types";
+import {
+  COUNTRY_MATCH_MODES,
+  DEFAULT_MATCH_PREFERENCES,
+  LANGUAGE_OPTIONS,
+  VIBE_OPTIONS,
+  type CountryMatchMode,
+  type MatchPreferences,
+  type VibeOption,
+} from "@/types/models";
 
 type SupabaseAdminClient = SupabaseClient<Database, "public", "public">;
 type Profile = Tables<"profiles">;
 type QueueEntry = Tables<"matchmaking_queue">;
 type CallSession = Tables<"call_sessions">;
+type MatchableProfile = Pick<
+  Profile,
+  "id" | "profile_completed" | "account_status" | "country" | "interests"
+>;
 
 type PartnerSummary = Pick<
   Profile,
@@ -47,6 +61,20 @@ const ACTIVE_SESSION_STATUSES: Array<CallSession["status"]> = [
 ];
 const SEARCH_STALE_MS = 90_000;
 const REMATCH_COOLDOWN_MS = 10 * 60_000;
+const MAX_MATCH_TOPICS = 5;
+
+const languageValues = new Set<string>(
+  LANGUAGE_OPTIONS.map((option) => option.value),
+);
+
+const matchPreferencesInputSchema = z
+  .object({
+    vibe: z.string().trim().optional(),
+    topics: z.array(z.string().trim().min(1).max(30)).max(8).optional(),
+    language: z.string().trim().min(1).max(40).optional(),
+    countryMode: z.string().trim().optional(),
+  })
+  .optional();
 
 const idleState = (): MatchmakingState => ({
   state: "idle",
@@ -54,6 +82,167 @@ const idleState = (): MatchmakingState => ({
   session: null,
   partner: null,
 });
+
+function normalizeToken(value: string | null | undefined) {
+  return (value ?? "").trim().toLowerCase();
+}
+
+function uniqueCleanStrings(values: Array<string | null | undefined>) {
+  const seen = new Set<string>();
+  const clean: string[] = [];
+
+  values.forEach((value) => {
+    const trimmed = value?.trim();
+    if (!trimmed) return;
+
+    const key = normalizeToken(trimmed);
+    if (seen.has(key)) return;
+
+    seen.add(key);
+    clean.push(trimmed);
+  });
+
+  return clean;
+}
+
+function normalizeMatchPreferences(
+  input: unknown,
+  profile?: Pick<Profile, "interests"> | null,
+): MatchPreferences {
+  const parsed = matchPreferencesInputSchema.safeParse(input);
+  const raw = parsed.success ? parsed.data : undefined;
+  const rawVibe = raw?.vibe ?? DEFAULT_MATCH_PREFERENCES.vibe;
+  const rawLanguage = raw?.language ?? DEFAULT_MATCH_PREFERENCES.language;
+  const rawCountryMode =
+    raw?.countryMode ?? DEFAULT_MATCH_PREFERENCES.countryMode;
+  const fallbackTopics = profile?.interests?.slice(0, 3) ?? [];
+
+  return {
+    vibe: (VIBE_OPTIONS as readonly string[]).includes(rawVibe)
+      ? (rawVibe as VibeOption)
+      : DEFAULT_MATCH_PREFERENCES.vibe,
+    topics: uniqueCleanStrings(
+      raw?.topics?.length ? raw.topics : fallbackTopics,
+    ).slice(0, MAX_MATCH_TOPICS),
+    language: languageValues.has(rawLanguage)
+      ? rawLanguage
+      : DEFAULT_MATCH_PREFERENCES.language,
+    countryMode: (COUNTRY_MATCH_MODES as readonly string[]).includes(
+      rawCountryMode,
+    )
+      ? (rawCountryMode as CountryMatchMode)
+      : DEFAULT_MATCH_PREFERENCES.countryMode,
+  };
+}
+
+function readQueuePreferences(
+  queue: QueueEntry | null | undefined,
+  profile?: Pick<Profile, "interests"> | null,
+) {
+  return normalizeMatchPreferences(queue?.preferences, profile);
+}
+
+function languageCompatible(a: MatchPreferences, b: MatchPreferences) {
+  return (
+    a.language === "Any" ||
+    b.language === "Any" ||
+    normalizeToken(a.language) === normalizeToken(b.language)
+  );
+}
+
+function countryCompatible(
+  currentProfile: Pick<Profile, "country"> | null,
+  currentPreferences: MatchPreferences,
+  candidateProfile: Pick<Profile, "country"> | null,
+  candidatePreferences: MatchPreferences,
+) {
+  const requiresSameCountry =
+    currentPreferences.countryMode === "same_country" ||
+    candidatePreferences.countryMode === "same_country";
+
+  if (!requiresSameCountry) return true;
+
+  const currentCountry = normalizeToken(currentProfile?.country);
+  const candidateCountry = normalizeToken(candidateProfile?.country);
+
+  return !!currentCountry && currentCountry === candidateCountry;
+}
+
+function sharedTopicCount(
+  currentProfile: Pick<Profile, "interests"> | null,
+  currentPreferences: MatchPreferences,
+  candidateProfile: Pick<Profile, "interests"> | null,
+  candidatePreferences: MatchPreferences,
+) {
+  const currentTopics = uniqueCleanStrings([
+    ...currentPreferences.topics,
+    ...(currentProfile?.interests ?? []),
+  ]).map(normalizeToken);
+  const candidateTopics = new Set(
+    uniqueCleanStrings([
+      ...candidatePreferences.topics,
+      ...(candidateProfile?.interests ?? []),
+    ]).map(normalizeToken),
+  );
+
+  return currentTopics.filter((topic) => candidateTopics.has(topic)).length;
+}
+
+function preferencesCompatible(
+  currentProfile: Pick<Profile, "country" | "interests"> | null,
+  currentPreferences: MatchPreferences,
+  candidateProfile: Pick<Profile, "country" | "interests"> | null,
+  candidatePreferences: MatchPreferences,
+) {
+  return (
+    languageCompatible(currentPreferences, candidatePreferences) &&
+    countryCompatible(
+      currentProfile,
+      currentPreferences,
+      candidateProfile,
+      candidatePreferences,
+    )
+  );
+}
+
+function candidateScore(
+  currentProfile: Pick<Profile, "country" | "interests"> | null,
+  currentPreferences: MatchPreferences,
+  candidateProfile: Pick<Profile, "country" | "interests"> | null,
+  candidatePreferences: MatchPreferences,
+) {
+  let score = 0;
+
+  if (
+    currentPreferences.language !== "Any" &&
+    normalizeToken(currentPreferences.language) ===
+      normalizeToken(candidatePreferences.language)
+  ) {
+    score += 40;
+  }
+
+  if (
+    normalizeToken(currentProfile?.country) &&
+    normalizeToken(currentProfile?.country) ===
+      normalizeToken(candidateProfile?.country)
+  ) {
+    score += 25;
+  }
+
+  if (currentPreferences.vibe === candidatePreferences.vibe) {
+    score += 20;
+  }
+
+  score +=
+    sharedTopicCount(
+      currentProfile,
+      currentPreferences,
+      candidateProfile,
+      candidatePreferences,
+    ) * 12;
+
+  return score;
+}
 
 async function getSupabaseAdminClient() {
   const { getSupabaseAdmin } =
@@ -188,10 +377,10 @@ async function hydrateMatchState(
 async function assertCanMatch(
   supabaseAdmin: SupabaseAdminClient,
   userId: string,
-) {
+): Promise<MatchableProfile> {
   const { data: profile, error } = await supabaseAdmin
     .from("profiles")
-    .select("profile_completed, account_status")
+    .select("id, profile_completed, account_status, country, interests")
     .eq("id", userId)
     .maybeSingle();
   if (error) throw new Error(error.message);
@@ -201,6 +390,8 @@ async function assertCanMatch(
   if (profile.account_status !== "active") {
     throw new Error("This account is not ready for matching.");
   }
+
+  return profile;
 }
 
 async function isCandidateAvailable(
@@ -246,21 +437,37 @@ async function tryCreateMatch(
   userId: string,
 ): Promise<MatchmakingState> {
   const staleCutoff = new Date(Date.now() - SEARCH_STALE_MS).toISOString();
-  
+
   // Fast path: Atomic Matchmaking RPC (Requires Migration)
   // We try this first. If the RPC doesn't exist, we fallback to the old loop.
   const { data: atomicSession, error: rpcError } = await supabaseAdmin.rpc(
-    // @ts-ignore: atomic_matchmaking might not be in the generated types yet
+    // @ts-expect-error atomic_matchmaking is ahead of the generated types.
     "atomic_matchmaking",
     {
       p_user_id: userId,
       p_stale_cutoff: staleCutoff,
-    }
+    },
   );
 
   if (!rpcError && atomicSession) {
     return hydrateMatchState(supabaseAdmin, userId);
   }
+
+  const [currentQueue, currentProfileResult] = await Promise.all([
+    getOwnQueueEntry(supabaseAdmin, userId),
+    supabaseAdmin
+      .from("profiles")
+      .select("id, profile_completed, account_status, country, interests")
+      .eq("id", userId)
+      .maybeSingle(),
+  ]);
+
+  if (currentProfileResult.error) {
+    throw new Error(currentProfileResult.error.message);
+  }
+
+  const currentProfile = currentProfileResult.data;
+  const currentPreferences = readQueuePreferences(currentQueue, currentProfile);
 
   // Fallback path: Manual matching loop
   const { data: candidates, error } = await supabaseAdmin
@@ -271,11 +478,60 @@ async function tryCreateMatch(
     .neq("user_id", userId)
     .gte("heartbeat_at", staleCutoff)
     .order("joined_at", { ascending: true })
-    .limit(8);
+    .limit(24);
 
   if (error) throw new Error(error.message);
 
-  for (const candidate of candidates ?? []) {
+  const candidateIds = (candidates ?? []).map((candidate) => candidate.user_id);
+  const { data: candidateProfiles, error: candidateProfilesError } =
+    candidateIds.length
+      ? await supabaseAdmin
+          .from("profiles")
+          .select("id, profile_completed, account_status, country, interests")
+          .in("id", candidateIds)
+      : { data: [], error: null };
+
+  if (candidateProfilesError) throw new Error(candidateProfilesError.message);
+
+  const profileById = new Map(
+    (candidateProfiles ?? []).map((profile) => [profile.id, profile]),
+  );
+
+  const rankedCandidates = (candidates ?? [])
+    .map((candidate) => {
+      const candidateProfile = profileById.get(candidate.user_id) ?? null;
+      const candidatePreferences = readQueuePreferences(
+        candidate,
+        candidateProfile,
+      );
+
+      return {
+        candidate,
+        candidateProfile,
+        score: preferencesCompatible(
+          currentProfile,
+          currentPreferences,
+          candidateProfile,
+          candidatePreferences,
+        )
+          ? candidateScore(
+              currentProfile,
+              currentPreferences,
+              candidateProfile,
+              candidatePreferences,
+            )
+          : -1,
+      };
+    })
+    .filter(({ score }) => score >= 0)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return (
+        Date.parse(a.candidate.joined_at) - Date.parse(b.candidate.joined_at)
+      );
+    });
+
+  for (const { candidate } of rankedCandidates) {
     if (
       !(await isCandidateAvailable(supabaseAdmin, userId, candidate.user_id))
     ) {
@@ -420,9 +676,11 @@ export const getMatchmakingState = createServerFn({ method: "GET" })
 
 export const startMatching = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
-  .handler(async ({ context }): Promise<MatchmakingState> => {
+  .validator((input: unknown) => normalizeMatchPreferences(input))
+  .handler(async ({ data, context }): Promise<MatchmakingState> => {
     const supabaseAdmin = await getSupabaseAdminClient();
-    await assertCanMatch(supabaseAdmin, context.userId);
+    const profile = await assertCanMatch(supabaseAdmin, context.userId);
+    const preferences = normalizeMatchPreferences(data, profile);
 
     const existingState = await hydrateMatchState(
       supabaseAdmin,
@@ -439,6 +697,7 @@ export const startMatching = createServerFn({ method: "POST" })
         user_id: context.userId,
         status: "searching",
         session_id: null,
+        preferences,
         joined_at: joinedAt,
         heartbeat_at: now,
       },

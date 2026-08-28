@@ -1,26 +1,18 @@
-import React, { createContext, useContext, useEffect, useState, useRef } from "react";
-
-interface CameraContextValue {
-  localStream: MediaStream | null;
-  cameraError: string;
-  isReady: boolean;
-  startCamera: () => Promise<void>;
-  stopCamera: () => void;
-}
-
-const CameraContext = createContext<CameraContextValue | null>(null);
+import React, { useCallback, useEffect, useRef, useState } from "react";
+import { CameraContext } from "./camera-context";
 
 export function CameraProvider({ children }: { children: React.ReactNode }) {
   const [localStream, setLocalStream] = useState<MediaStream | null>(null);
   const [cameraError, setCameraError] = useState("");
   const [isReady, setIsReady] = useState(false);
+  const localStreamRef = useRef<MediaStream | null>(null);
   const startingRef = useRef(false);
 
-  const startCamera = async () => {
-    if (localStream || startingRef.current) return;
+  const startCamera = useCallback(async () => {
+    if (localStreamRef.current || startingRef.current) return;
     startingRef.current = true;
     setCameraError("");
-    
+
     try {
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
@@ -34,6 +26,7 @@ export function CameraProvider({ children }: { children: React.ReactNode }) {
           autoGainControl: true,
         },
       });
+      localStreamRef.current = stream;
       setLocalStream(stream);
       setIsReady(true);
     } catch (error) {
@@ -44,19 +37,21 @@ export function CameraProvider({ children }: { children: React.ReactNode }) {
     } finally {
       startingRef.current = false;
     }
-  };
+  }, []);
 
-  const stopCamera = () => {
-    if (localStream) {
-      localStream.getTracks().forEach((track) => track.stop());
-      setLocalStream(null);
+  const stopCamera = useCallback(() => {
+    if (localStreamRef.current) {
+      localStreamRef.current.getTracks().forEach((track) => track.stop());
+      localStreamRef.current = null;
     }
+    setLocalStream(null);
+    setCameraError("");
     setIsReady(false);
-  };
+  }, []);
 
   useEffect(() => {
     return () => stopCamera();
-  }, []);
+  }, [stopCamera]);
 
   return (
     <CameraContext.Provider
@@ -65,12 +60,4 @@ export function CameraProvider({ children }: { children: React.ReactNode }) {
       {children}
     </CameraContext.Provider>
   );
-}
-
-export function useCamera() {
-  const context = useContext(CameraContext);
-  if (!context) {
-    throw new Error("useCamera must be used within a CameraProvider");
-  }
-  return context;
 }

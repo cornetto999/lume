@@ -1,18 +1,25 @@
-import { useEffect, useRef, useState } from "react";
+import { type CSSProperties, useEffect, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
+  AlertTriangle,
+  Ban,
   Camera,
   CameraOff,
+  Check,
   CircleStop,
+  Clock3,
   Loader2,
   LogOut,
+  MessageCircleQuestion,
   Mic,
   MicOff,
   Radio,
   RotateCcw,
   Search,
+  ShieldCheck,
   SkipForward,
+  Sparkles,
   StepForward,
   UserRound,
   Video,
@@ -20,7 +27,26 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import { useCamera } from "@/contexts/CameraContext";
+import { Checkbox } from "@/components/ui/checkbox";
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog";
+import { Label } from "@/components/ui/label";
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
+import { Slider } from "@/components/ui/slider";
+import { Textarea } from "@/components/ui/textarea";
+import { useCamera } from "@/contexts/useCamera";
 import { supabase } from "@/integrations/supabase/client";
 import { getMyProfile } from "@/lib/profile.functions";
 import {
@@ -30,8 +56,14 @@ import {
   startMatching,
   type MatchmakingState,
 } from "@/lib/matchmaking.functions";
+import { fileSafetyReport } from "@/lib/safety.functions";
+import {
+  DEFAULT_MATCH_PREFERENCES,
+  REPORT_REASON_LABELS,
+  type ReportReason,
+} from "@/types/models";
 
-type CameraState = "starting" | "ready" | "blocked" | "unsupported";
+type CameraState = "off" | "starting" | "ready" | "blocked" | "unsupported";
 type RtcStatus =
   "idle" | "waiting" | "connecting" | "live" | "disconnected" | "failed";
 
@@ -39,12 +71,21 @@ type RtcSignalPayload = {
   sessionId: string;
   from: string;
   to: string;
-  type: "ready" | "offer" | "answer" | "candidate" | "leave";
+  type: "ready" | "offer" | "answer" | "candidate" | "leave" | "intro_continue";
   description?: RTCSessionDescriptionInit;
   candidate?: RTCIceCandidateInit;
 };
 
 const SIGNAL_EVENT = "webrtc_signal";
+const INTRO_SECONDS = 30;
+const ICEBREAKER_CARDS = [
+  "What's your dream destination?",
+  "Coffee or milk tea?",
+  "What song has been stuck in your head lately?",
+  "Would you rather time travel or teleport?",
+  "What's one tiny thing that made your week better?",
+  "What's your go-to comfort game, show or playlist?",
+] as const;
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
@@ -56,9 +97,14 @@ function isSignalPayload(value: unknown): value is RtcSignalPayload {
     typeof payload.sessionId === "string" &&
     typeof payload.from === "string" &&
     typeof payload.to === "string" &&
-    ["ready", "offer", "answer", "candidate", "leave"].includes(
-      payload.type ?? "",
-    )
+    [
+      "ready",
+      "offer",
+      "answer",
+      "candidate",
+      "leave",
+      "intro_continue",
+    ].includes(payload.type ?? "")
   );
 }
 
@@ -81,23 +127,29 @@ function CallRoom() {
   const queryClient = useQueryClient();
   const videoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
-  const { localStream, cameraError, isReady, startCamera } = useCamera();
-  const cameraState: CameraState = isReady 
-    ? (cameraError ? "blocked" : "ready") 
-    : "starting";
+  const { localStream, cameraError, isReady, startCamera, stopCamera } =
+    useCamera();
+  const cameraSupported =
+    typeof navigator === "undefined" || !!navigator.mediaDevices?.getUserMedia;
 
+  const [mediaRequested, setMediaRequested] = useState(false);
   const [cameraOn, setCameraOn] = useState(true);
   const [micOn, setMicOn] = useState(true);
+  const [introAccepted, setIntroAccepted] = useState(false);
+  const [introSecondsLeft, setIntroSecondsLeft] = useState(INTRO_SECONDS);
+  const [icebreakerIndex, setIcebreakerIndex] = useState(0);
+  const [selfCameraHeight, setSelfCameraHeight] = useState(220);
+  const [shieldOpen, setShieldOpen] = useState(false);
+  const [reportReason, setReportReason] = useState<ReportReason>("harassment");
+  const [reportDetails, setReportDetails] = useState("");
+  const [blockAfterReport, setBlockAfterReport] = useState(false);
 
-          
   const { data: profile, isLoading: profileLoading } = useQuery({
     queryKey: ["my-profile"],
     queryFn: () => getMyProfile(),
     retry: 1,
     throwOnError: false,
   });
-
-  const [wasSearching, setWasSearching] = useState(false);
 
   const {
     data: matchState,
@@ -113,7 +165,6 @@ function CallRoom() {
       const s = query.state.data?.state;
       // Realtime handles instant match detection — polling is a safety net only
       if (s === "searching" || s === "matched") return 1_500;
-      if (wasSearching && s === "idle") return 1_500;
       return false;
     },
   });
@@ -121,6 +172,15 @@ function CallRoom() {
   const status = matchState?.state ?? "idle";
   const activeSession =
     matchState?.state === "matched" ? matchState.session : null;
+  const cameraState: CameraState = !cameraSupported
+    ? "unsupported"
+    : isReady
+      ? cameraError
+        ? "blocked"
+        : "ready"
+      : mediaRequested
+        ? "starting"
+        : "off";
   const partnerId =
     activeSession && profile?.id
       ? activeSession.user_a === profile.id
@@ -131,8 +191,8 @@ function CallRoom() {
   const partnerName =
     matchState?.state === "matched"
       ? matchState.partner?.display_name ||
-      matchState.partner?.username ||
-      "Your match"
+        matchState.partner?.username ||
+        "Your match"
       : "Finding match";
   const roomName = activeSession
     ? activeSession.room_name.replace(/^lume-/, "").slice(0, 8)
@@ -141,6 +201,8 @@ function CallRoom() {
     status: rtcStatus,
     error: rtcError,
     hasRemoteVideo,
+    partnerIntroReady,
+    sendIntroContinue,
   } = useCallConnection({
     sessionId: activeSession?.id ?? null,
     currentUserId: profile?.id ?? null,
@@ -149,8 +211,12 @@ function CallRoom() {
     partnerId,
     isOfferer,
     localStream: localStream,
-    mediaReady: cameraState !== "starting",
+    mediaReady: cameraState !== "starting" && cameraState !== "off",
     remoteVideoRef,
+  });
+  const roomMatchPreferences = () => ({
+    ...DEFAULT_MATCH_PREFERENCES,
+    topics: profile?.interests?.slice(0, 3) ?? [],
   });
 
   const setMatchState = (state: MatchmakingState) => {
@@ -159,7 +225,13 @@ function CallRoom() {
   };
 
   const startMutation = useMutation({
-    mutationFn: () => startMatching(),
+    mutationFn: async () => {
+      setMediaRequested(true);
+      await startCamera();
+      setCameraOn(true);
+      setMicOn(true);
+      return startMatching({ data: roomMatchPreferences() });
+    },
     onSuccess: (state) => {
       setMatchState(state);
       toast[state.state === "matched" ? "success" : "info"](
@@ -168,14 +240,18 @@ function CallRoom() {
           : "Searching for someone live now.",
       );
     },
-    onError: (error: Error) =>
-      toast.error(error.message || "Could not start matching."),
+    onError: (error: Error) => {
+      setMediaRequested(false);
+      stopCamera();
+      toast.error(error.message || "Could not start matching.");
+    },
   });
 
   const cancelMutation = useMutation({
     mutationFn: () => cancelMatching(),
     onSuccess: (state) => {
-      setWasSearching(false);
+      setMediaRequested(false);
+      stopCamera();
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
@@ -186,7 +262,8 @@ function CallRoom() {
   const endMutation = useMutation({
     mutationFn: () => endCurrentMatch(),
     onSuccess: (state) => {
-      setWasSearching(false);
+      setMediaRequested(false);
+      stopCamera();
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
@@ -194,23 +271,16 @@ function CallRoom() {
       toast.error(error.message || "Could not end the match."),
   });
 
-  const skipMutation = useMutation({
-    mutationFn: () => endCurrentMatch(),
-    onSuccess: (state) => {
-      setWasSearching(false);
-      setMatchState(state);
-      toast.info("Match skipped.");
-    },
-    onError: (error: Error) =>
-      toast.error(error.message || "Could not skip this match."),
-  });
-
   const nextMutation = useMutation({
     mutationFn: async () => {
       if (matchState?.state === "matched") {
         await endCurrentMatch();
       }
-      return startMatching();
+      setMediaRequested(true);
+      await startCamera();
+      setCameraOn(true);
+      setMicOn(true);
+      return startMatching({ data: roomMatchPreferences() });
     },
     onSuccess: (state) => {
       setMatchState(state);
@@ -220,8 +290,48 @@ function CallRoom() {
           : "Looking for your next match.",
       );
     },
+    onError: (error: Error) => {
+      setMediaRequested(false);
+      stopCamera();
+      toast.error(error.message || "Could not find the next match.");
+    },
+  });
+
+  const safetyMutation = useMutation({
+    mutationFn: () => {
+      if (!activeSession?.id || !partnerId) {
+        throw new Error("There is no active match to report.");
+      }
+
+      return fileSafetyReport({
+        data: {
+          sessionId: activeSession.id,
+          reportedId: partnerId,
+          reason: reportReason,
+          details: reportDetails,
+          block: blockAfterReport,
+        },
+      });
+    },
+    onSuccess: (result) => {
+      toast.success(
+        result.blocked
+          ? "Report sent and this person is blocked."
+          : "Report sent to Lume Shield.",
+      );
+      setShieldOpen(false);
+      setReportDetails("");
+      setBlockAfterReport(false);
+      void queryClient.invalidateQueries({ queryKey: ["matchmaking-state"] });
+
+      if (result.blocked) {
+        setMediaRequested(false);
+        stopCamera();
+        navigate({ to: "/lobby", replace: true });
+      }
+    },
     onError: (error: Error) =>
-      toast.error(error.message || "Could not find the next match."),
+      toast.error(error.message || "Could not send the report."),
   });
 
   useEffect(() => {
@@ -242,27 +352,14 @@ function CallRoom() {
     toast.error(msg);
   }, [matchError]);
 
-  // Track whether we've ever been in searching/matched state this session
   useEffect(() => {
-    if (matchState?.state === "searching" || matchState?.state === "matched") {
-      setWasSearching(true);
-    }
-  }, [matchState?.state]);
-
-  // Auto-restart matching when the search goes stale and drops back to idle.
-  // This prevents the user from getting stuck on the call page with an idle
-  // state after a 90-second stale search timeout.
-  useEffect(() => {
-    if (
-      wasSearching &&
-      matchState?.state === "idle" &&
-      !busy &&
-      !!profile?.profile_completed
-    ) {
-      setWasSearching(false);
-      startMutation.mutate();
-    }
-  }, [wasSearching, matchState?.state, profile?.profile_completed]); // eslint-disable-line react-hooks/exhaustive-deps
+    setIntroAccepted(false);
+    setIntroSecondsLeft(INTRO_SECONDS);
+    setIcebreakerIndex(0);
+    setShieldOpen(false);
+    setReportDetails("");
+    setBlockAfterReport(false);
+  }, [activeSession?.id]);
 
   // Realtime: instantly detect when our queue entry is marked 'matched'.
   // The matchmaking_queue table is in the Realtime publication, so we get
@@ -300,12 +397,56 @@ function CallRoom() {
     };
   }, [profile?.id, matchState?.state, queryClient]);
 
+  const introComplete =
+    status === "matched" && introAccepted && partnerIntroReady;
+  const introActive = status === "matched" && !introComplete;
+  const introExpired = introActive && introSecondsLeft === 0;
+  const currentIcebreaker =
+    ICEBREAKER_CARDS[icebreakerIndex % ICEBREAKER_CARDS.length];
+  const canUseShield = status === "matched" && !!activeSession && !!partnerId;
+
   useEffect(() => {
-    // If not ready, tell context to start it (if it isn't already)
-    if (!isReady) {
-      void startCamera();
+    if (!introActive || introSecondsLeft <= 0) return;
+
+    const timer = window.setTimeout(() => {
+      setIntroSecondsLeft((seconds) => Math.max(0, seconds - 1));
+    }, 1_000);
+
+    return () => window.clearTimeout(timer);
+  }, [introActive, introSecondsLeft]);
+
+  useEffect(() => {
+    if (status === "searching" || status === "matched") return;
+    if (mediaRequested && (startMutation.isPending || nextMutation.isPending)) {
+      return;
     }
-  }, [isReady, startCamera]);
+
+    setMediaRequested(false);
+    if (localStream) {
+      stopCamera();
+    }
+  }, [
+    localStream,
+    mediaRequested,
+    nextMutation.isPending,
+    startMutation.isPending,
+    status,
+    stopCamera,
+  ]);
+
+  useEffect(() => {
+    if (!localStream) return;
+    if (!cameraOn) {
+      localStream.getVideoTracks().forEach((track) => {
+        track.enabled = false;
+      });
+    }
+    if (!micOn) {
+      localStream.getAudioTracks().forEach((track) => {
+        track.enabled = false;
+      });
+    }
+  }, [cameraOn, localStream, micOn]);
 
   useEffect(() => {
     if (videoRef.current && localStream) {
@@ -341,6 +482,13 @@ function CallRoom() {
     setMicOn(next);
   };
 
+  const continueIntro = () => {
+    setIntroAccepted(true);
+    void sendIntroContinue().catch(() => {
+      toast.error("Could not send your intro response.");
+    });
+  };
+
   const leave = () => {
     if (matchState?.state === "matched") {
       endMutation.mutate();
@@ -352,6 +500,8 @@ function CallRoom() {
       return;
     }
 
+    setMediaRequested(false);
+    stopCamera();
     navigate({ to: "/lobby", replace: true });
   };
 
@@ -377,8 +527,8 @@ function CallRoom() {
     startMutation.isPending ||
     cancelMutation.isPending ||
     endMutation.isPending ||
-    skipMutation.isPending ||
-    nextMutation.isPending;
+    nextMutation.isPending ||
+    safetyMutation.isPending;
 
   return (
     <main className="min-h-screen bg-background">
@@ -390,19 +540,34 @@ function CallRoom() {
               {status === "matched" ? "Live match" : "Camera check"}
             </h1>
           </div>
-          <Button
-            variant="secondary"
-            className="h-11 rounded-xl"
-            disabled={busy}
-            onClick={leave}
-          >
-            <LogOut className="size-4" />
-            Leave
-          </Button>
+          <div className="flex items-center gap-2">
+            {status === "matched" && (
+              <div className="hidden h-10 items-center gap-2 rounded-full border border-success/30 bg-success/10 px-3 text-sm font-medium text-success sm:flex">
+                <ShieldCheck className="size-4" />
+                Shield on
+              </div>
+            )}
+            <Button
+              variant="secondary"
+              className="h-11 rounded-xl"
+              disabled={busy}
+              onClick={leave}
+            >
+              <LogOut className="size-4" />
+              Leave
+            </Button>
+          </div>
         </header>
 
         <section className="grid flex-1 grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="relative min-h-[320px] overflow-hidden rounded-2xl border border-border bg-surface">
+          <div
+            className="relative order-2 h-[var(--self-camera-height)] min-h-[160px] overflow-hidden rounded-2xl border border-border bg-surface md:order-1 md:h-auto md:min-h-[320px]"
+            style={
+              {
+                "--self-camera-height": `${selfCameraHeight}px`,
+              } as CSSProperties
+            }
+          >
             <video
               ref={videoRef}
               autoPlay
@@ -426,7 +591,9 @@ function CallRoom() {
                       ? "Camera unavailable"
                       : cameraState === "blocked"
                         ? "Camera permission needed"
-                        : "Starting camera"}
+                        : cameraState === "off"
+                          ? "Camera and mic are off"
+                          : "Starting camera"}
                   </p>
                   {cameraError && (
                     <p className="mt-1 max-w-xs text-sm text-muted-foreground">
@@ -446,7 +613,7 @@ function CallRoom() {
             </div>
           </div>
 
-          <div className="relative min-h-[320px] overflow-hidden rounded-2xl border border-border bg-surface">
+          <div className="relative order-1 min-h-[360px] overflow-hidden rounded-2xl border border-border bg-surface md:order-2 md:min-h-[320px]">
             <video
               ref={remoteVideoRef}
               autoPlay
@@ -505,10 +672,11 @@ function CallRoom() {
             </div>
             {status === "matched" && (
               <div
-                className={`absolute right-4 top-4 flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium ${rtcStatus === "live"
+                className={`absolute right-4 top-4 flex items-center gap-2 rounded-full px-3 py-1 text-sm font-medium ${
+                  rtcStatus === "live"
                     ? "bg-success/15 text-success"
                     : "bg-background/80 text-muted-foreground"
-                  }`}
+                }`}
               >
                 {rtcStatus === "live" ? (
                   <Radio className="size-3.5" />
@@ -521,35 +689,146 @@ function CallRoom() {
           </div>
         </section>
 
+        <section className="rounded-2xl border border-border bg-surface p-4 md:hidden">
+          <div className="flex items-center justify-between gap-4">
+            <Label
+              htmlFor="self-camera-size"
+              className="text-sm font-medium text-foreground"
+            >
+              Your camera size
+            </Label>
+            <span className="text-xs font-medium text-muted-foreground">
+              {selfCameraHeight}px
+            </span>
+          </div>
+          <Slider
+            id="self-camera-size"
+            min={160}
+            max={340}
+            step={20}
+            value={[selfCameraHeight]}
+            onValueChange={([value]) => {
+              if (typeof value === "number") setSelfCameraHeight(value);
+            }}
+            className="mt-4"
+          />
+        </section>
+
+        {status === "matched" && (
+          <section className="grid gap-3 md:grid-cols-[1.1fr_0.9fr]">
+            <div className="rounded-2xl border border-border bg-surface p-4">
+              <div className="flex flex-wrap items-start justify-between gap-3">
+                <div>
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <Clock3 className="size-4 text-primary" />
+                    {introComplete
+                      ? "Intro continued"
+                      : introExpired
+                        ? "Intro ended"
+                        : `${introSecondsLeft}s intro`}
+                  </div>
+                  <p className="mt-1 text-sm text-muted-foreground">
+                    {introComplete
+                      ? "You both chose to keep chatting."
+                      : "Both people tap Continue to keep the room going."}
+                  </p>
+                </div>
+                <Button
+                  className="h-10 rounded-xl"
+                  disabled={introAccepted}
+                  onClick={continueIntro}
+                >
+                  {introAccepted ? (
+                    <Check className="size-4" />
+                  ) : (
+                    <Sparkles className="size-4" />
+                  )}
+                  {introAccepted ? "Waiting" : "Continue"}
+                </Button>
+              </div>
+
+              <div className="mt-4 grid grid-cols-2 gap-2">
+                <div className="rounded-xl border border-border bg-background p-3">
+                  <p className="text-xs text-muted-foreground">You</p>
+                  <p className="mt-1 flex items-center gap-1.5 text-sm font-medium text-foreground">
+                    {introAccepted ? (
+                      <Check className="size-4 text-success" />
+                    ) : (
+                      <Clock3 className="size-4 text-muted-foreground" />
+                    )}
+                    {introAccepted ? "Continuing" : "Deciding"}
+                  </p>
+                </div>
+                <div className="rounded-xl border border-border bg-background p-3">
+                  <p className="text-xs text-muted-foreground">Match</p>
+                  <p className="mt-1 flex items-center gap-1.5 text-sm font-medium text-foreground">
+                    {partnerIntroReady ? (
+                      <Check className="size-4 text-success" />
+                    ) : (
+                      <Clock3 className="size-4 text-muted-foreground" />
+                    )}
+                    {partnerIntroReady ? "Continuing" : "Deciding"}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            <div className="rounded-2xl border border-border bg-surface p-4">
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <MessageCircleQuestion className="size-4 text-primary" />
+                    Icebreaker
+                  </div>
+                  <p className="mt-2 text-lg font-semibold leading-snug text-foreground">
+                    {currentIcebreaker}
+                  </p>
+                </div>
+                <Button
+                  size="icon"
+                  variant="secondary"
+                  className="size-10 shrink-0 rounded-xl"
+                  onClick={() => setIcebreakerIndex((index) => index + 1)}
+                >
+                  <RotateCcw className="size-4" />
+                  <span className="sr-only">Next icebreaker</span>
+                </Button>
+              </div>
+            </div>
+          </section>
+        )}
+
         <footer className="flex flex-wrap items-center justify-center gap-3">
           <Button
             variant="secondary"
             className="h-12 rounded-full px-4"
-            disabled={busy || status !== "matched"}
-            onClick={() => skipMutation.mutate()}
-          >
-            {skipMutation.isPending ? (
-              <Loader2 className="size-5 animate-spin" />
-            ) : (
-              <SkipForward className="size-5" />
-            )}
-            <span className="hidden sm:inline">Skip</span>
-            <span className="sr-only sm:hidden">Skip match</span>
-          </Button>
-          <Button
-            variant="secondary"
-            className="h-12 rounded-full px-4"
-            disabled={busy}
+            disabled={busy || status === "searching"}
             onClick={() => nextMutation.mutate()}
           >
             {nextMutation.isPending ? (
               <Loader2 className="size-5 animate-spin" />
+            ) : status === "matched" ? (
+              <SkipForward className="size-5" />
             ) : (
               <StepForward className="size-5" />
             )}
-            <span className="hidden sm:inline">Next</span>
+            <span className="hidden sm:inline">
+              {status === "matched" ? "Skip / Next" : "Next"}
+            </span>
             <span className="sr-only sm:hidden">Next match</span>
           </Button>
+          {status === "matched" && (
+            <Button
+              variant="secondary"
+              className="h-12 rounded-full px-4"
+              disabled={busy || !canUseShield}
+              onClick={() => setShieldOpen(true)}
+            >
+              <ShieldCheck className="size-5" />
+              <span className="hidden sm:inline">Shield</span>
+              <span className="sr-only sm:hidden">Open Lume Shield</span>
+            </Button>
+          )}
           <Button
             size="icon"
             variant={micOn ? "secondary" : "destructive"}
@@ -609,6 +888,107 @@ function CallRoom() {
             <span className="sr-only sm:hidden">Stop matching</span>
           </Button>
         </footer>
+
+        <Dialog open={shieldOpen} onOpenChange={setShieldOpen}>
+          <DialogContent className="max-w-md rounded-2xl border-border bg-surface">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <ShieldCheck className="size-5 text-primary" />
+                Lume Shield
+              </DialogTitle>
+              <DialogDescription>
+                Send this session to moderation. Blocking also prevents future
+                matches with this person.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="space-y-4">
+              <div className="space-y-2">
+                <Label htmlFor="report-reason">Reason</Label>
+                <Select
+                  value={reportReason}
+                  onValueChange={(value) =>
+                    setReportReason(value as ReportReason)
+                  }
+                >
+                  <SelectTrigger id="report-reason" className="h-11 rounded-xl">
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    {(Object.keys(REPORT_REASON_LABELS) as ReportReason[]).map(
+                      (reason) => (
+                        <SelectItem key={reason} value={reason}>
+                          {REPORT_REASON_LABELS[reason]}
+                        </SelectItem>
+                      ),
+                    )}
+                  </SelectContent>
+                </Select>
+              </div>
+
+              <div className="space-y-2">
+                <Label htmlFor="report-details">Details</Label>
+                <Textarea
+                  id="report-details"
+                  value={reportDetails}
+                  onChange={(event) =>
+                    setReportDetails(event.target.value.slice(0, 1000))
+                  }
+                  placeholder="Add context for the safety team"
+                  className="min-h-24 rounded-xl"
+                />
+              </div>
+
+              <label className="flex items-start gap-3 rounded-xl border border-border bg-background p-3">
+                <Checkbox
+                  checked={blockAfterReport}
+                  onCheckedChange={(checked) =>
+                    setBlockAfterReport(checked === true)
+                  }
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="flex items-center gap-2 text-sm font-medium text-foreground">
+                    <Ban className="size-4 text-destructive" />
+                    Block this person
+                  </span>
+                  <span className="mt-1 block text-sm text-muted-foreground">
+                    End this room and keep them out of future matches.
+                  </span>
+                </span>
+              </label>
+
+              {blockAfterReport && (
+                <div className="flex gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
+                  <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                  This will close the current match after the report is sent.
+                </div>
+              )}
+            </div>
+
+            <DialogFooter>
+              <Button
+                variant="secondary"
+                disabled={safetyMutation.isPending}
+                onClick={() => setShieldOpen(false)}
+              >
+                Cancel
+              </Button>
+              <Button
+                variant="destructive"
+                disabled={safetyMutation.isPending || !canUseShield}
+                onClick={() => safetyMutation.mutate()}
+              >
+                {safetyMutation.isPending ? (
+                  <Loader2 className="size-4 animate-spin" />
+                ) : (
+                  <ShieldCheck className="size-4" />
+                )}
+                Send report
+              </Button>
+            </DialogFooter>
+          </DialogContent>
+        </Dialog>
       </div>
     </main>
   );
@@ -636,12 +1016,16 @@ function useCallConnection({
   const [status, setStatus] = useState<RtcStatus>("idle");
   const [error, setError] = useState("");
   const [hasRemoteVideo, setHasRemoteVideo] = useState(false);
+  const [partnerIntroReady, setPartnerIntroReady] = useState(false);
+  const sendIntroContinueRef = useRef<(() => Promise<void>) | null>(null);
 
   useEffect(() => {
     if (!sessionId || !currentUserId || !partnerId) {
       setStatus("idle");
       setError("");
       setHasRemoteVideo(false);
+      setPartnerIntroReady(false);
+      sendIntroContinueRef.current = null;
       if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
       return;
     }
@@ -673,6 +1057,7 @@ function useCallConnection({
     setStatus("waiting");
     setError("");
     setHasRemoteVideo(false);
+    setPartnerIntroReady(false);
     if (remoteVideo) remoteVideo.srcObject = remoteStream;
 
     const sendSignal = async (
@@ -690,6 +1075,7 @@ function useCallConnection({
         } satisfies RtcSignalPayload,
       });
     };
+    sendIntroContinueRef.current = () => sendSignal({ type: "intro_continue" });
 
     const flushQueuedCandidates = async () => {
       while (queuedCandidates.length > 0 && peer.remoteDescription) {
@@ -718,7 +1104,8 @@ function useCallConnection({
           if (track.kind === "video") {
             const params = sender.getParameters();
             if (!params.encodings) params.encodings = [{}];
-            params.encodings[0].maxBitrate = 8000_000;
+            const [encoding] = params.encodings;
+            if (encoding) encoding.maxBitrate = 8000_000;
             sender.setParameters(params).catch(() => null);
           }
         });
@@ -811,6 +1198,11 @@ function useCallConnection({
         try {
           if (payload.type === "leave") {
             setStatus("disconnected");
+            return;
+          }
+
+          if (payload.type === "intro_continue") {
+            setPartnerIntroReady(true);
             return;
           }
 
@@ -924,6 +1316,8 @@ function useCallConnection({
       disposed = true;
       peer.close();
       setHasRemoteVideo(false);
+      setPartnerIntroReady(false);
+      sendIntroContinueRef.current = null;
       if (remoteVideo) remoteVideo.srcObject = null;
       void supabase.removeChannel(channel);
     };
@@ -938,5 +1332,12 @@ function useCallConnection({
     sessionId,
   ]);
 
-  return { status, error, hasRemoteVideo };
+  return {
+    status,
+    error,
+    hasRemoteVideo,
+    partnerIntroReady,
+    sendIntroContinue: () =>
+      sendIntroContinueRef.current?.() ?? Promise.resolve(),
+  };
 }
