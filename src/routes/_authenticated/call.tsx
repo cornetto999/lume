@@ -47,7 +47,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
 import { useCamera } from "@/contexts/useCamera";
 import { supabase } from "@/integrations/supabase/client";
@@ -151,7 +150,6 @@ function CallRoom() {
   const [introAccepted, setIntroAccepted] = useState(false);
   const [introSecondsLeft, setIntroSecondsLeft] = useState(INTRO_SECONDS);
   const [icebreakerIndex, setIcebreakerIndex] = useState(0);
-  const [selfCameraHeight, setSelfCameraHeight] = useState(220);
   const [shieldOpen, setShieldOpen] = useState(false);
   const [reportReason, setReportReason] = useState<ReportReason>("harassment");
   const [reportDetails, setReportDetails] = useState("");
@@ -579,14 +577,7 @@ function CallRoom() {
         </header>
 
         <section className="grid flex-1 grid-cols-1 gap-4 md:grid-cols-2">
-          <div
-            className="relative order-2 h-[var(--self-camera-height)] min-h-[160px] overflow-hidden rounded-2xl border border-border bg-surface md:order-1 md:h-auto md:min-h-[320px]"
-            style={
-              {
-                "--self-camera-height": `${selfCameraHeight}px`,
-              } as CSSProperties
-            }
-          >
+          <div className="relative order-2 h-[220px] min-h-[160px] overflow-hidden rounded-2xl border border-border bg-surface md:order-1 md:h-auto md:min-h-[320px]">
             <video
               ref={videoRef}
               autoPlay
@@ -597,11 +588,11 @@ function CallRoom() {
             />
             {cameraState !== "ready" && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 bg-background/90 px-6 text-center">
-                <div className="flex size-16 items-center justify-center rounded-2xl bg-primary/15">
+                <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/15">
                   {cameraState === "starting" ? (
-                    <Loader2 className="size-7 animate-spin text-primary" />
+                    <Loader2 className="size-6 animate-spin text-primary" />
                   ) : (
-                    <CameraOff className="size-7 text-primary" />
+                    <CameraOff className="size-6 text-primary" />
                   )}
                 </div>
                 <div>
@@ -641,21 +632,21 @@ function CallRoom() {
             />
             {!hasRemoteVideo && (
               <div className="absolute inset-0 flex flex-col items-center justify-center gap-4 px-6 text-center">
-                <div className="flex size-20 items-center justify-center rounded-3xl bg-primary/15">
+                <div className="flex size-14 items-center justify-center rounded-2xl bg-primary/15">
                   {status === "matched" ? (
                     rtcStatus === "failed" || rtcStatus === "disconnected" ? (
-                      <CameraOff className="size-10 text-primary" />
+                      <CameraOff className="size-6 text-primary" />
                     ) : (
-                      <UserRound className="size-10 text-primary" />
+                      <UserRound className="size-6 text-primary" />
                     )
                   ) : status === "searching" ? (
-                    <Loader2 className="size-10 animate-spin text-primary" />
+                    <Loader2 className="size-6 animate-spin text-primary" />
                   ) : (
-                    <Search className="size-10 text-primary" />
+                    <Search className="size-6 text-primary" />
                   )}
                 </div>
                 <div>
-                  <p className="text-xl font-bold text-foreground">
+                  <p className="text-lg font-semibold text-foreground">
                     {partnerName}
                   </p>
                   <p className="mt-1 text-sm text-muted-foreground">
@@ -708,30 +699,7 @@ function CallRoom() {
           </div>
         </section>
 
-        <section className="rounded-2xl border border-border bg-surface p-4 md:hidden">
-          <div className="flex items-center justify-between gap-4">
-            <Label
-              htmlFor="self-camera-size"
-              className="text-sm font-medium text-foreground"
-            >
-              Your camera size
-            </Label>
-            <span className="text-xs font-medium text-muted-foreground">
-              {selfCameraHeight}px
-            </span>
-          </div>
-          <Slider
-            id="self-camera-size"
-            min={160}
-            max={340}
-            step={20}
-            value={[selfCameraHeight]}
-            onValueChange={([value]) => {
-              if (typeof value === "number") setSelfCameraHeight(value);
-            }}
-            className="mt-4"
-          />
-        </section>
+
 
         {status === "matched" && (
           <section className="grid gap-3 md:grid-cols-[1.1fr_0.9fr]">
