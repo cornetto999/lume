@@ -6,6 +6,7 @@ import type { Database, Tables } from "@/integrations/supabase/types";
 import {
   COUNTRY_MATCH_MODES,
   DEFAULT_MATCH_PREFERENCES,
+  FAST_MATCH_AFTER_MS,
   LANGUAGE_OPTIONS,
   VIBE_OPTIONS,
   type CountryMatchMode,
@@ -60,7 +61,7 @@ const ACTIVE_SESSION_STATUSES: Array<CallSession["status"]> = [
   "connected",
 ];
 const SEARCH_STALE_MS = 90_000;
-const REMATCH_COOLDOWN_MS = 10 * 60_000;
+const REMATCH_COOLDOWN_MS = 5_000;
 const MAX_MATCH_TOPICS = 5;
 
 const languageValues = new Set<string>(
@@ -244,6 +245,13 @@ function candidateScore(
   return score;
 }
 
+function shouldRelaxSearch(queue: QueueEntry | null | undefined) {
+  const joinedAt = Date.parse(queue?.joined_at ?? "");
+  return (
+    Number.isFinite(joinedAt) && Date.now() - joinedAt >= FAST_MATCH_AFTER_MS
+  );
+}
+
 async function getSupabaseAdminClient() {
   const { getSupabaseAdmin } =
     await import("@/integrations/supabase/client.server");
@@ -298,6 +306,59 @@ async function getSession(
     .maybeSingle();
   if (error) throw new Error(error.message);
   return data;
+}
+
+async function endQueueSession(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+  queue: QueueEntry | null,
+  endReason: string,
+  nextQueueStatus: "cancelled" | "searching",
+) {
+  if (!queue?.session_id) return;
+
+  const session = await getSession(supabaseAdmin, queue.session_id);
+  if (!session || !isActiveSession(session)) return;
+
+  const now = new Date().toISOString();
+  const participantIds = [session.user_a, session.user_b];
+  const startedAt = Date.parse(session.started_at);
+  const durationSeconds = Number.isFinite(startedAt)
+    ? Math.max(0, Math.round((Date.now() - startedAt) / 1000))
+    : null;
+
+  const [sessionUpdate, queueUpdate, profileUpdate] = await Promise.all([
+    supabaseAdmin
+      .from("call_sessions")
+      .update({
+        status: "ended",
+        ended_at: now,
+        ended_by: userId,
+        end_reason: endReason,
+        duration_seconds: durationSeconds,
+      })
+      .eq("id", session.id),
+    supabaseAdmin
+      .from("matchmaking_queue")
+      .update({
+        status: nextQueueStatus,
+        session_id: null,
+        joined_at: now,
+        heartbeat_at: now,
+      })
+      .eq("session_id", session.id),
+    supabaseAdmin
+      .from("profiles")
+      .update({
+        presence: nextQueueStatus === "searching" ? "searching" : "online",
+        last_active_at: now,
+      })
+      .in("id", participantIds),
+  ]);
+
+  if (sessionUpdate.error) throw new Error(sessionUpdate.error.message);
+  if (queueUpdate.error) throw new Error(queueUpdate.error.message);
+  if (profileUpdate.error) throw new Error(profileUpdate.error.message);
 }
 
 async function hydrateMatchState(
@@ -438,21 +499,6 @@ async function tryCreateMatch(
 ): Promise<MatchmakingState> {
   const staleCutoff = new Date(Date.now() - SEARCH_STALE_MS).toISOString();
 
-  // Fast path: Atomic Matchmaking RPC (Requires Migration)
-  // We try this first. If the RPC doesn't exist, we fallback to the old loop.
-  const { data: atomicSession, error: rpcError } = await supabaseAdmin.rpc(
-    // @ts-expect-error atomic_matchmaking is ahead of the generated types.
-    "atomic_matchmaking",
-    {
-      p_user_id: userId,
-      p_stale_cutoff: staleCutoff,
-    },
-  );
-
-  if (!rpcError && atomicSession) {
-    return hydrateMatchState(supabaseAdmin, userId);
-  }
-
   const [currentQueue, currentProfileResult] = await Promise.all([
     getOwnQueueEntry(supabaseAdmin, userId),
     supabaseAdmin
@@ -468,6 +514,7 @@ async function tryCreateMatch(
 
   const currentProfile = currentProfileResult.data;
   const currentPreferences = readQueuePreferences(currentQueue, currentProfile);
+  const relaxSearch = shouldRelaxSearch(currentQueue);
 
   // Fallback path: Manual matching loop
   const { data: candidates, error } = await supabaseAdmin
@@ -504,23 +551,26 @@ async function tryCreateMatch(
         candidate,
         candidateProfile,
       );
-
-      return {
-        candidate,
+      const compatible = preferencesCompatible(
+        currentProfile,
+        currentPreferences,
         candidateProfile,
-        score: preferencesCompatible(
-          currentProfile,
-          currentPreferences,
-          candidateProfile,
-          candidatePreferences,
-        )
+        candidatePreferences,
+      );
+      const score =
+        compatible || relaxSearch
           ? candidateScore(
               currentProfile,
               currentPreferences,
               candidateProfile,
               candidatePreferences,
-            )
-          : -1,
+            ) + (compatible ? 1_000 : 0)
+          : -1;
+
+      return {
+        candidate,
+        candidateProfile,
+        score,
       };
     })
     .filter(({ score }) => score >= 0)
@@ -714,6 +764,46 @@ export const startMatching = createServerFn({ method: "POST" })
     return tryCreateMatch(supabaseAdmin, context.userId);
   });
 
+export const findNextMatch = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
+  .validator((input: unknown) => normalizeMatchPreferences(input))
+  .handler(async ({ data, context }): Promise<MatchmakingState> => {
+    const supabaseAdmin = await getSupabaseAdminClient();
+    const profile = await assertCanMatch(supabaseAdmin, context.userId);
+    const preferences = normalizeMatchPreferences(data, profile);
+    const queue = await getOwnQueueEntry(supabaseAdmin, context.userId);
+
+    await endQueueSession(
+      supabaseAdmin,
+      context.userId,
+      queue,
+      "skipped",
+      "searching",
+    );
+
+    const now = new Date().toISOString();
+    const { error } = await supabaseAdmin.from("matchmaking_queue").upsert(
+      {
+        user_id: context.userId,
+        status: "searching",
+        session_id: null,
+        preferences,
+        joined_at: now,
+        heartbeat_at: now,
+      },
+      { onConflict: "user_id" },
+    );
+    if (error) throw new Error(error.message);
+
+    const { error: presenceError } = await supabaseAdmin
+      .from("profiles")
+      .update({ presence: "searching", last_active_at: now })
+      .eq("id", context.userId);
+    if (presenceError) throw new Error(presenceError.message);
+
+    return tryCreateMatch(supabaseAdmin, context.userId);
+  });
+
 export const cancelMatching = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .handler(async ({ context }): Promise<MatchmakingState> => {
@@ -746,40 +836,13 @@ export const endCurrentMatch = createServerFn({ method: "POST" })
     const queue = await getOwnQueueEntry(supabaseAdmin, context.userId);
     if (!queue?.session_id) return idleState();
 
-    const session = await getSession(supabaseAdmin, queue.session_id);
-    if (!session) return idleState();
-
-    const now = new Date().toISOString();
-    const participantIds = [session.user_a, session.user_b];
-    const startedAt = Date.parse(session.started_at);
-    const durationSeconds = Number.isFinite(startedAt)
-      ? Math.max(0, Math.round((Date.now() - startedAt) / 1000))
-      : null;
-
-    const [sessionUpdate, queueUpdate, profileUpdate] = await Promise.all([
-      supabaseAdmin
-        .from("call_sessions")
-        .update({
-          status: "ended",
-          ended_at: now,
-          ended_by: context.userId,
-          end_reason: "user_left",
-          duration_seconds: durationSeconds,
-        })
-        .eq("id", session.id),
-      supabaseAdmin
-        .from("matchmaking_queue")
-        .update({ status: "cancelled", heartbeat_at: now })
-        .eq("session_id", session.id),
-      supabaseAdmin
-        .from("profiles")
-        .update({ presence: "online", last_active_at: now })
-        .in("id", participantIds),
-    ]);
-
-    if (sessionUpdate.error) throw new Error(sessionUpdate.error.message);
-    if (queueUpdate.error) throw new Error(queueUpdate.error.message);
-    if (profileUpdate.error) throw new Error(profileUpdate.error.message);
+    await endQueueSession(
+      supabaseAdmin,
+      context.userId,
+      queue,
+      "user_left",
+      "cancelled",
+    );
 
     return idleState();
   });

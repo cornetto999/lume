@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -8,6 +8,8 @@ import {
   Camera,
   Check,
   CheckCircle2,
+  ChevronDown,
+  ChevronUp,
   Code2,
   Crown,
   Cpu,
@@ -16,7 +18,6 @@ import {
   Film,
   Flame,
   Gamepad2,
-  Gift,
   Globe2,
   Heart,
   Languages,
@@ -30,12 +31,15 @@ import {
   Palette,
   Plane,
   Radio,
+  SendHorizontal,
   Settings,
   ShieldCheck,
   SlidersHorizontal,
   Smile,
   Sparkles,
   Trophy,
+  UserCheck,
+  UserPlus,
   Users,
   Utensils,
   Video,
@@ -43,6 +47,7 @@ import {
   type LucideIcon,
 } from "lucide-react";
 import { toast } from "sonner";
+import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -72,12 +77,24 @@ import {
   getMyProfile,
   heartbeat,
 } from "@/lib/profile.functions";
+import {
+  getSocialSummary,
+  markConnectionMessagesRead,
+  markNotificationsRead,
+  respondConnection,
+  sendConnectionMessage,
+} from "@/lib/social.functions";
 import { cn } from "@/lib/utils";
 import { supabase } from "@/integrations/supabase/client";
 import {
   DEFAULT_MATCH_PREFERENCES,
   LANGUAGE_OPTIONS,
+  VIBE_OPTIONS,
   type CountryMatchMode,
+  type Notification,
+  type PublicProfile,
+  type SocialConnection,
+  type LobbyTrend,
   type VibeOption,
 } from "@/types/models";
 
@@ -99,8 +116,10 @@ type TopicCard = {
 };
 
 const HERO_MATCH_IMAGE = "/lume-assets/hero-match.png";
-const FALLBACK_AVATAR = "/lume-assets/profile-avatar.png";
 const DEFAULT_TOPIC_SELECTION = ["Music", "Developers"];
+const DEFAULT_VISIBLE_TREND_COUNT = 4;
+const DEFAULT_VISIBLE_VIBE_COUNT = 2;
+const DEFAULT_VISIBLE_TOPIC_COUNT = 6;
 
 const VIBE_CARDS: VibeCard[] = [
   {
@@ -143,6 +162,12 @@ const TOPIC_CARDS: TopicCard[] = [
     iconClassName: "text-rose-300",
   },
   {
+    label: "Developers",
+    topic: "Developers",
+    icon: Code2,
+    iconClassName: "text-primary",
+  },
+  {
     label: "Travel",
     topic: "Travel",
     icon: Plane,
@@ -171,12 +196,6 @@ const TOPIC_CARDS: TopicCard[] = [
     topic: "Tech",
     icon: Cpu,
     iconClassName: "text-teal-300",
-  },
-  {
-    label: "Developers",
-    topic: "Developers",
-    icon: Code2,
-    iconClassName: "text-primary",
   },
   {
     label: "Food",
@@ -229,12 +248,28 @@ const TOPIC_CARDS: TopicCard[] = [
   },
 ];
 
-const TRENDING_VIBES = [
-  { label: "Chill", count: 12, dotClassName: "bg-violet-400" },
-  { label: "Music", count: 8, dotClassName: "bg-orange-400" },
-  { label: "Friendship", count: 6, dotClassName: "bg-rose-400" },
-  { label: "Study", count: 4, dotClassName: "bg-blue-400" },
-];
+const TRENDING_DOT_CLASSES: Record<string, string> = {
+  Gaming: "bg-green-400",
+  Music: "bg-orange-400",
+  Study: "bg-blue-400",
+  Chill: "bg-violet-400",
+  Tech: "bg-teal-400",
+  Friendship: "bg-rose-400",
+};
+
+function getUserInitials(name: string) {
+  const words = name.trim().split(/\s+/).filter(Boolean);
+  const initials =
+    words.length > 1
+      ? `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}`
+      : words[0]?.slice(0, 2) || "LU";
+
+  return initials.toUpperCase();
+}
+
+function getProfileDisplayName(profile: PublicProfile | null | undefined) {
+  return profile?.display_name || profile?.username || "Lume friend";
+}
 
 export const Route = createFileRoute("/_authenticated/lobby")({
   ssr: false,
@@ -268,6 +303,13 @@ function Lobby() {
   const [countryMode, setCountryMode] =
     useState<CountryMatchMode>("same_country");
   const [focusTopics, setFocusTopics] = useState<string[]>([]);
+  const [showAllTrends, setShowAllTrends] = useState(false);
+  const [showAllVibes, setShowAllVibes] = useState(false);
+  const [showAllTopics, setShowAllTopics] = useState(false);
+  const [activeConversationId, setActiveConversationId] = useState<
+    string | null
+  >(null);
+  const [directMessageInput, setDirectMessageInput] = useState("");
 
   const {
     data: profile,
@@ -300,6 +342,68 @@ function Lobby() {
       query.state.data?.state === "searching" ? 1_500 : false,
   });
   const status = matchState?.state ?? "idle";
+
+  const { data: socialSummary, isLoading: socialLoading } = useQuery({
+    queryKey: ["social-summary"],
+    queryFn: () => getSocialSummary(),
+    enabled: !!profile?.profile_completed,
+    retry: 1,
+    throwOnError: false,
+    refetchInterval: 15_000,
+  });
+
+  const respondConnectionMutation = useMutation({
+    mutationFn: ({
+      connectionId,
+      action,
+    }: {
+      connectionId: string;
+      action: "accept" | "decline";
+    }) => respondConnection({ data: { connectionId, action } }),
+    onSuccess: (state, variables) => {
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      if (variables.action === "accept" && state.connection) {
+        setActiveConversationId(state.connection.id);
+        setActivePanel("messages");
+        toast.success("Friend confirmed. Messages are unlocked.");
+      } else {
+        toast.info("Friend request declined.");
+      }
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not update the friend request."),
+  });
+
+  const sendConnectionMessageMutation = useMutation({
+    mutationFn: ({
+      connectionId,
+      body,
+    }: {
+      connectionId: string;
+      body: string;
+    }) => sendConnectionMessage({ data: { connectionId, body } }),
+    onSuccess: () => {
+      setDirectMessageInput("");
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not send the message."),
+  });
+
+  const markNotificationsMutation = useMutation({
+    mutationFn: () => markNotificationsRead(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+    },
+  });
+
+  const markConnectionMessagesReadMutation = useMutation({
+    mutationFn: (connectionId: string) =>
+      markConnectionMessagesRead({ data: { connectionId } }),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+    },
+  });
 
   useEffect(() => {
     if (profileLoading) return;
@@ -450,6 +554,145 @@ function Lobby() {
     };
   }, [profile?.id, queryClient, status]);
 
+  useEffect(() => {
+    const userId = profile?.id;
+    if (!userId) return;
+
+    const invalidateSocial = () => {
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+    };
+    const channel = supabase
+      .channel(`lobby-social-watch-${userId}`)
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "connections",
+          filter: `requester_id=eq.${userId}`,
+        },
+        invalidateSocial,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "connections",
+          filter: `addressee_id=eq.${userId}`,
+        },
+        invalidateSocial,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "direct_messages",
+          filter: `sender_id=eq.${userId}`,
+        },
+        invalidateSocial,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "direct_messages",
+          filter: `recipient_id=eq.${userId}`,
+        },
+        invalidateSocial,
+      )
+      .on(
+        "postgres_changes",
+        {
+          event: "*",
+          schema: "public",
+          table: "notifications",
+          filter: `user_id=eq.${userId}`,
+        },
+        invalidateSocial,
+      )
+      .subscribe();
+
+    return () => {
+      void supabase.removeChannel(channel);
+    };
+  }, [profile?.id, queryClient]);
+
+  const socialConnections = useMemo(
+    () => socialSummary?.connections ?? [],
+    [socialSummary?.connections],
+  );
+  const pendingRequests = useMemo(
+    () => socialSummary?.pendingRequests ?? [],
+    [socialSummary?.pendingRequests],
+  );
+  const incomingRequests = useMemo(
+    () => pendingRequests.filter((request) => request.direction === "incoming"),
+    [pendingRequests],
+  );
+  const outgoingRequests = useMemo(
+    () => pendingRequests.filter((request) => request.direction === "outgoing"),
+    [pendingRequests],
+  );
+  const socialNotifications = useMemo(
+    () => socialSummary?.notifications ?? [],
+    [socialSummary?.notifications],
+  );
+  const activeConversation = useMemo(
+    () =>
+      socialConnections.find(
+        (connection) => connection.id === activeConversationId,
+      ) ??
+      socialConnections[0] ??
+      null,
+    [activeConversationId, socialConnections],
+  );
+  const conversationMessages = useMemo(
+    () =>
+      activeConversation
+        ? (socialSummary?.messages ?? []).filter(
+            (message) => message.connection_id === activeConversation.id,
+          )
+        : [],
+    [activeConversation, socialSummary?.messages],
+  );
+  const messageBadgeCount = socialSummary?.unreadMessages ?? 0;
+  const alertBadgeCount = Math.max(
+    socialSummary?.unreadNotifications ?? 0,
+    incomingRequests.length,
+  );
+
+  useEffect(() => {
+    if (activePanel !== "messages") return;
+    if (activeConversationId || !socialConnections[0]) return;
+    setActiveConversationId(socialConnections[0].id);
+  }, [activeConversationId, activePanel, socialConnections]);
+
+  useEffect(() => {
+    if (activePanel !== "alerts") return;
+    if (!socialSummary?.unreadNotifications) return;
+    if (markNotificationsMutation.isPending) return;
+    markNotificationsMutation.mutate();
+  }, [
+    activePanel,
+    markNotificationsMutation,
+    socialSummary?.unreadNotifications,
+  ]);
+
+  useEffect(() => {
+    if (activePanel !== "messages") return;
+    if (!activeConversation?.id || activeConversation.unreadCount <= 0) return;
+    if (markConnectionMessagesReadMutation.isPending) return;
+    markConnectionMessagesReadMutation.mutate(activeConversation.id);
+  }, [
+    activeConversation?.id,
+    activeConversation?.unreadCount,
+    activePanel,
+    markConnectionMessagesReadMutation,
+  ]);
+
   const signOut = async () => {
     await heartbeat({ data: { presence: "offline" } }).catch(() => null);
     await supabase.auth.signOut();
@@ -484,7 +727,8 @@ function Lobby() {
   }
 
   const displayName = profile?.display_name || profile?.username || "Friend";
-  const avatarSrc = profile?.avatar_url || FALLBACK_AVATAR;
+  const avatarSrc = profile?.avatar_url || undefined;
+  const avatarInitials = getUserInitials(displayName);
   const onlineCount = snapshot?.onlineCount ?? 0;
   const searchingCount = snapshot?.searchingCount ?? 0;
   const matchingBusy =
@@ -517,6 +761,30 @@ function Lobby() {
         ? Bell
         : Settings;
   const selectedTopicCount = focusTopics.length;
+  const trendingVibes =
+    snapshot?.trendingVibes ??
+    VIBE_OPTIONS.map((label) => ({ label, count: 0 }));
+  const visibleTrendingVibes = showAllTrends
+    ? trendingVibes
+    : trendingVibes.slice(0, DEFAULT_VISIBLE_TREND_COUNT);
+  const hiddenTrendCount = Math.max(
+    0,
+    trendingVibes.length - DEFAULT_VISIBLE_TREND_COUNT,
+  );
+  const visibleVibeCards = showAllVibes
+    ? VIBE_CARDS
+    : VIBE_CARDS.slice(0, DEFAULT_VISIBLE_VIBE_COUNT);
+  const visibleTopicCards = showAllTopics
+    ? TOPIC_CARDS
+    : TOPIC_CARDS.slice(0, DEFAULT_VISIBLE_TOPIC_COUNT);
+  const hiddenVibeCount = Math.max(
+    0,
+    VIBE_CARDS.length - DEFAULT_VISIBLE_VIBE_COUNT,
+  );
+  const hiddenTopicCount = Math.max(
+    0,
+    TOPIC_CARDS.length - DEFAULT_VISIBLE_TOPIC_COUNT,
+  );
 
   const toggleFocusTopic = (topic: string) => {
     if (preferencesLocked) return;
@@ -554,19 +822,19 @@ function Lobby() {
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <div className="pointer-events-none fixed inset-0 bg-[linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] opacity-20 [background-size:72px_72px]" />
-      <div className="relative mx-auto flex min-h-screen w-full max-w-6xl flex-col px-5 py-6 safe-top safe-bottom sm:px-8 lg:px-10">
-        <header className="flex flex-wrap items-center justify-between gap-4">
+      <div className="relative mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-4 safe-top safe-bottom sm:px-6 lg:px-8">
+        <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center">
-            <div className="font-display text-4xl font-black leading-none sm:text-5xl">
+            <div className="font-display text-3xl font-black leading-none sm:text-4xl">
               Lum<span className="text-primary">e</span>
             </div>
-            <Sparkles className="-ml-0.5 mb-6 size-6 text-primary" />
+            <Sparkles className="-ml-0.5 mb-5 size-5 text-primary" />
           </div>
 
           <div className="flex items-center gap-2 sm:gap-3">
             <Button
               variant="secondary"
-              className="h-9 rounded-xl border border-border bg-surface/80 px-3 text-sm text-primary shadow-sm backdrop-blur hover:bg-surface-raised"
+              className="h-8 rounded-lg border border-border bg-surface/80 px-3 text-xs text-primary shadow-sm backdrop-blur hover:bg-surface-raised"
               onClick={() => toast.info("Lume Plus is coming soon.")}
             >
               <Crown className="size-4 fill-primary/25 text-primary" />
@@ -575,50 +843,60 @@ function Lobby() {
             <IconHeaderButton
               icon={MessageCircle}
               label="Messages"
+              badgeCount={messageBadgeCount}
               onClick={() => setActivePanel("messages")}
             />
             <IconHeaderButton
               icon={Bell}
               label="Alerts"
+              badgeCount={alertBadgeCount}
               onClick={() => setActivePanel("alerts")}
             />
             <button
               type="button"
-              className="relative size-10 overflow-hidden rounded-full border border-border bg-surface shadow-sm transition hover:border-primary/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              aria-label={`${displayName} profile settings`}
+              className="relative size-9 rounded-full border border-border bg-surface shadow-sm transition hover:border-primary/60 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
               onClick={() => setActivePanel("settings")}
             >
-              <img
-                src={avatarSrc}
-                alt={`${displayName} profile`}
-                className="h-full w-full object-cover"
-              />
+              <Avatar className="size-full">
+                {avatarSrc && (
+                  <AvatarImage
+                    src={avatarSrc}
+                    alt={`${displayName} profile`}
+                    className="object-cover"
+                  />
+                )}
+                <AvatarFallback className="bg-primary/15 text-xs font-bold text-primary">
+                  {avatarInitials}
+                </AvatarFallback>
+              </Avatar>
               <span className="absolute bottom-0.5 right-0.5 size-3.5 rounded-full border-2 border-background bg-success" />
             </button>
           </div>
         </header>
 
-        <section className="grid gap-6 py-6 md:grid-cols-[0.86fr_1.14fr] md:items-center lg:py-8">
+        <section className="grid gap-4 py-4 md:grid-cols-[0.88fr_1.12fr] md:items-center lg:py-5">
           <div className="relative">
             <Sparkles className="absolute -left-2 top-2 size-4 rotate-12 text-primary" />
-            <h1 className="max-w-xl text-4xl font-black leading-[0.98] sm:text-5xl lg:text-6xl">
+            <h1 className="max-w-lg text-3xl font-black leading-[0.98] sm:text-4xl lg:text-5xl">
               Ready to meet <span className="block text-primary">someone?</span>
             </h1>
-            <p className="mt-4 text-base text-muted-foreground sm:text-lg">
+            <p className="mt-3 text-sm text-muted-foreground sm:text-base">
               Good people. Real conversations.
             </p>
           </div>
 
-          <div className="relative min-h-[220px] overflow-hidden md:min-h-[290px]">
-            <div className="absolute inset-x-0 top-0 h-64 rounded-[2rem] bg-[radial-gradient(circle,rgba(255,255,255,0.16)_1px,transparent_1px)] opacity-40 [background-size:12px_12px]" />
+          <div className="relative min-h-[170px] overflow-hidden md:min-h-[230px]">
+            <div className="absolute inset-x-0 top-0 h-52 rounded-[1.5rem] bg-[radial-gradient(circle,rgba(255,255,255,0.16)_1px,transparent_1px)] opacity-40 [background-size:12px_12px]" />
             <img
               src={HERO_MATCH_IMAGE}
               alt="Two Lume members matched in a video call preview"
-              className="relative z-10 mx-auto h-auto w-full max-w-[540px] object-contain"
+              className="relative z-10 mx-auto h-auto w-full max-w-[430px] object-contain"
             />
           </div>
         </section>
 
-        <section className="grid overflow-hidden rounded-2xl border border-border bg-surface/70 shadow-xl shadow-black/20 backdrop-blur sm:grid-cols-3">
+        <section className="grid overflow-hidden rounded-xl border border-border bg-surface/70 shadow-lg shadow-black/15 backdrop-blur sm:grid-cols-3">
           <StatMetric
             icon={Radio}
             iconClassName="border-success/30 bg-success/10 text-success"
@@ -644,18 +922,19 @@ function Lobby() {
           />
         </section>
 
-        <section className="mt-4 flex flex-wrap items-center gap-3 rounded-2xl border border-border bg-surface/55 p-2 backdrop-blur">
-          <div className="flex h-9 items-center gap-2 rounded-full px-2.5 text-sm font-semibold">
-            <Flame className="size-5 fill-primary text-primary" />
+        <section className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface/55 p-1.5 backdrop-blur">
+          <div className="flex h-8 items-center gap-2 rounded-full px-2 text-xs font-semibold">
+            <Flame className="size-4 fill-primary text-primary" />
             TRENDING NOW
           </div>
           <div className="flex min-w-0 flex-1 flex-wrap gap-2">
-            {TRENDING_VIBES.map((trend) => (
+            {visibleTrendingVibes.map((trend) => (
               <button
                 key={trend.label}
                 type="button"
-                className="inline-flex h-9 items-center gap-2 rounded-full border border-border bg-secondary/70 px-4 text-sm text-foreground transition hover:border-primary/60 hover:bg-primary/10"
+                className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-secondary/70 px-3 text-xs text-foreground transition hover:border-primary/60 hover:bg-primary/10"
                 onClick={() => {
+                  if (preferencesLocked) return;
                   const matching = VIBE_CARDS.find(
                     (card) =>
                       card.label === trend.label || card.value === trend.label,
@@ -664,32 +943,55 @@ function Lobby() {
                 }}
               >
                 <span
-                  className={cn("size-2 rounded-full", trend.dotClassName)}
+                  className={cn(
+                    "size-2 rounded-full",
+                    getTrendDotClassName(trend),
+                  )}
                 />
                 <span>{trend.label}</span>
-                <span className="text-muted-foreground">{trend.count}</span>
+                <span className="text-muted-foreground">
+                  {formatCount(trend.count)}
+                </span>
               </button>
             ))}
           </div>
-          <button
-            type="button"
-            className="ml-auto inline-flex h-9 items-center gap-2 rounded-full px-3 text-sm font-semibold text-primary transition hover:bg-primary/10"
-            onClick={() => setActivePanel("messages")}
-          >
-            See all
-            <ArrowRight className="size-4" />
-          </button>
+          {hiddenTrendCount > 0 && (
+            <button
+              type="button"
+              className="ml-auto inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold text-primary transition hover:bg-primary/10"
+              onClick={() => setShowAllTrends((value) => !value)}
+            >
+              {showAllTrends ? "Show less" : "See all"}
+              {showAllTrends ? (
+                <ChevronUp className="size-3.5" />
+              ) : (
+                <ArrowRight className="size-3.5" />
+              )}
+            </button>
+          )}
         </section>
 
-        <section className="mt-4 rounded-2xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
-          <PanelHeading
-            icon={Heart}
-            iconClassName="text-rose-300"
-            title="I'm here to"
-            subtitle="Choose your vibe"
-          />
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
-            {VIBE_CARDS.map((card) => (
+        <section className="mt-3 rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur sm:p-5">
+          <div className="flex items-start justify-between gap-3">
+            <PanelHeading
+              icon={Heart}
+              iconClassName="text-rose-300"
+              title="I'm here to"
+              subtitle="Choose your vibe"
+            />
+            <SectionToggleButton
+              expanded={showAllVibes}
+              hiddenCount={hiddenVibeCount}
+              onClick={() => setShowAllVibes((value) => !value)}
+            />
+          </div>
+          <div
+            className={cn(
+              "mt-4 grid gap-3 sm:grid-cols-2",
+              showAllVibes && "lg:grid-cols-5",
+            )}
+          >
+            {visibleVibeCards.map((card) => (
               <LargeOptionButton
                 key={card.label}
                 icon={card.icon}
@@ -703,17 +1005,24 @@ function Lobby() {
           </div>
         </section>
 
-        <section className="mt-4 rounded-2xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
-          <PanelHeading
-            icon={MessageCircle}
-            iconClassName="text-pink-300"
-            title="I like talking about"
-            subtitle={`Pick topics you enjoy (choose up to 5)${
-              selectedTopicCount ? ` | ${selectedTopicCount} selected` : ""
-            }`}
-          />
-          <div className="mt-5 grid gap-3 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5">
-            {TOPIC_CARDS.map((card) => {
+        <section className="mt-3 rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur sm:p-5">
+          <div className="flex items-start justify-between gap-3">
+            <PanelHeading
+              icon={MessageCircle}
+              iconClassName="text-pink-300"
+              title="I like talking about"
+              subtitle={`Pick topics you enjoy (choose up to 5)${
+                selectedTopicCount ? ` | ${selectedTopicCount} selected` : ""
+              }`}
+            />
+            <SectionToggleButton
+              expanded={showAllTopics}
+              hiddenCount={hiddenTopicCount}
+              onClick={() => setShowAllTopics((value) => !value)}
+            />
+          </div>
+          <div className="mt-4 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
+            {visibleTopicCards.map((card) => {
               const selected = focusTopics.includes(card.topic);
               const handleClick = () => {
                 if (card.action === "settings") {
@@ -738,8 +1047,8 @@ function Lobby() {
           </div>
         </section>
 
-        <section className="mt-4 grid gap-3 lg:grid-cols-[0.86fr_1.14fr]">
-          <div className="rounded-2xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
+        <section className="mt-3 grid gap-3 lg:grid-cols-[0.86fr_1.14fr]">
+          <div className="rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
             <PanelHeading
               icon={Globe2}
               iconClassName="text-violet-300"
@@ -751,7 +1060,7 @@ function Lobby() {
               onValueChange={setSelectedLanguage}
               disabled={preferencesLocked}
             >
-              <SelectTrigger className="mt-4 h-11 rounded-xl border-border bg-secondary/70 px-4">
+              <SelectTrigger className="mt-3 h-10 rounded-lg border-border bg-secondary/70 px-3">
                 <SelectValue />
               </SelectTrigger>
               <SelectContent>
@@ -764,14 +1073,14 @@ function Lobby() {
             </Select>
           </div>
 
-          <div className="rounded-2xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
+          <div className="rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
             <PanelHeading
               icon={MapPin}
               iconClassName="text-violet-300"
               title="Country"
               subtitle="Where do you want to meet people from?"
             />
-            <div className="mt-5 grid overflow-hidden rounded-2xl border border-border bg-secondary/70 p-1 sm:grid-cols-2">
+            <div className="mt-3 grid overflow-hidden rounded-xl border border-border bg-secondary/70 p-1 sm:grid-cols-2">
               <SegmentButton
                 selected={countryMode === "global"}
                 disabled={preferencesLocked}
@@ -813,7 +1122,7 @@ function Lobby() {
           variant={status === "searching" ? "secondary" : "default"}
           disabled={matchingBusy}
           className={cn(
-            "ember-lift mt-5 h-12 w-full rounded-full text-base font-bold sm:h-14 sm:text-lg",
+            "ember-lift mt-4 h-11 w-full rounded-full text-sm font-bold sm:h-12 sm:text-base",
             status !== "searching" &&
               "bg-primary text-primary-foreground hover:bg-primary/90",
           )}
@@ -831,7 +1140,7 @@ function Lobby() {
           {primaryActionLabel}
         </Button>
 
-        <footer className="flex flex-wrap items-center justify-center gap-3 py-6 text-center text-sm text-muted-foreground">
+        <footer className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-xs text-muted-foreground">
           <ShieldCheck className="size-4" />
           <span>We keep Lume safe and friendly for everyone.</span>
           <button
@@ -849,7 +1158,12 @@ function Lobby() {
             if (!open) setActivePanel(null);
           }}
         >
-          <DialogContent className="max-w-md rounded-2xl border-border bg-surface">
+          <DialogContent
+            className={cn(
+              "rounded-2xl border-border bg-surface",
+              activePanel === "messages" ? "max-w-3xl" : "max-w-md",
+            )}
+          >
             <DialogHeader>
               <DialogTitle className="flex items-center gap-2">
                 <ActivePanelIcon className="size-5 text-primary" />
@@ -865,38 +1179,222 @@ function Lobby() {
             </DialogHeader>
 
             {activePanel === "messages" && (
-              <div className="space-y-3">
-                <div className="rounded-xl border border-border bg-background p-4">
-                  <div className="flex items-center gap-3">
-                    <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/15">
-                      <MessageCircle className="size-5 text-primary" />
+              <div className="grid min-h-[26rem] gap-3 md:grid-cols-[0.86fr_1.14fr]">
+                <div className="space-y-2 overflow-y-auto pr-1 md:max-h-[28rem]">
+                  {socialLoading ? (
+                    <div className="flex h-full min-h-48 items-center justify-center">
+                      <Loader2 className="size-6 animate-spin text-primary" />
                     </div>
-                    <div>
-                      <p className="font-medium text-foreground">
-                        No messages yet
-                      </p>
-                      <p className="text-sm text-muted-foreground">
-                        Save a Lume Moment after a mutual conversation.
-                      </p>
-                    </div>
-                  </div>
+                  ) : socialConnections.length === 0 ? (
+                    <EmptySocialCard
+                      icon={UserPlus}
+                      title="No friends yet"
+                      body="Add someone during a call. Once both people confirm, messages open here."
+                      action={
+                        <Button
+                          className="h-10 rounded-xl"
+                          onClick={() => {
+                            setActivePanel(null);
+                            if (status === "idle") startMutation.mutate();
+                          }}
+                          disabled={matchingBusy || status !== "idle"}
+                        >
+                          <Video className="size-4" />
+                          Start matching
+                        </Button>
+                      }
+                    />
+                  ) : (
+                    socialConnections.map((connection) => (
+                      <ConnectionListButton
+                        key={connection.id}
+                        connection={connection}
+                        selected={activeConversation?.id === connection.id}
+                        onClick={() => setActiveConversationId(connection.id)}
+                      />
+                    ))
+                  )}
                 </div>
-                <Button
-                  className="h-11 w-full rounded-xl"
-                  onClick={() => {
-                    setActivePanel(null);
-                    if (status === "idle") startMutation.mutate();
-                  }}
-                  disabled={matchingBusy || status !== "idle"}
-                >
-                  <Video className="size-4" />
-                  Start matching
-                </Button>
+
+                <div className="flex min-h-[22rem] flex-col overflow-hidden rounded-xl border border-border bg-background">
+                  {activeConversation ? (
+                    <>
+                      <div className="flex items-center gap-3 border-b border-border bg-muted/30 p-3">
+                        <SocialProfileAvatar
+                          profile={activeConversation.otherUser}
+                          className="size-10"
+                        />
+                        <div className="min-w-0">
+                          <p className="truncate font-semibold text-foreground">
+                            {getProfileDisplayName(
+                              activeConversation.otherUser,
+                            )}
+                          </p>
+                          <p className="text-xs text-success">
+                            Connected friend
+                          </p>
+                        </div>
+                      </div>
+                      <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
+                        {conversationMessages.length === 0 ? (
+                          <p className="m-auto max-w-xs text-center text-sm text-muted-foreground">
+                            No messages yet. Say hi now that you both confirmed.
+                          </p>
+                        ) : (
+                          conversationMessages.map((message) => {
+                            const isMe = message.sender_id === profile?.id;
+                            return (
+                              <div
+                                key={message.id}
+                                className={cn(
+                                  "max-w-[85%] rounded-2xl px-3 py-2 text-sm",
+                                  isMe
+                                    ? "self-end rounded-br-sm bg-primary text-primary-foreground"
+                                    : "self-start rounded-bl-sm bg-secondary text-secondary-foreground",
+                                )}
+                              >
+                                {message.body}
+                              </div>
+                            );
+                          })
+                        )}
+                      </div>
+                      <form
+                        className="flex gap-2 border-t border-border bg-muted/20 p-2"
+                        onSubmit={(event) => {
+                          event.preventDefault();
+                          const body = directMessageInput.trim();
+                          if (!body || !activeConversation) return;
+                          sendConnectionMessageMutation.mutate({
+                            connectionId: activeConversation.id,
+                            body,
+                          });
+                        }}
+                      >
+                        <input
+                          type="text"
+                          className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                          placeholder="Message your friend..."
+                          value={directMessageInput}
+                          onChange={(event) =>
+                            setDirectMessageInput(event.target.value)
+                          }
+                        />
+                        <Button
+                          type="submit"
+                          size="icon"
+                          className="size-10 shrink-0 rounded-xl"
+                          disabled={
+                            sendConnectionMessageMutation.isPending ||
+                            !directMessageInput.trim()
+                          }
+                        >
+                          {sendConnectionMessageMutation.isPending ? (
+                            <Loader2 className="size-4 animate-spin" />
+                          ) : (
+                            <SendHorizontal className="size-4" />
+                          )}
+                        </Button>
+                      </form>
+                    </>
+                  ) : (
+                    <EmptySocialCard
+                      icon={MessageSquare}
+                      title="Choose a friend"
+                      body="Confirmed friends appear here after a mutual request."
+                    />
+                  )}
+                </div>
               </div>
             )}
 
             {activePanel === "alerts" && (
               <div className="space-y-3">
+                {incomingRequests.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Friend requests
+                    </p>
+                    {incomingRequests.map((request) => (
+                      <div
+                        key={request.id}
+                        className="rounded-xl border border-primary/30 bg-primary/10 p-3"
+                      >
+                        <div className="flex items-center gap-3">
+                          <SocialProfileAvatar
+                            profile={request.otherUser}
+                            className="size-10"
+                          />
+                          <div className="min-w-0 flex-1">
+                            <p className="truncate font-medium text-foreground">
+                              {getProfileDisplayName(request.otherUser)}
+                            </p>
+                            <p className="text-sm text-muted-foreground">
+                              Wants to add you from a call.
+                            </p>
+                          </div>
+                        </div>
+                        <div className="mt-3 flex gap-2">
+                          <Button
+                            className="h-9 flex-1 rounded-lg"
+                            disabled={respondConnectionMutation.isPending}
+                            onClick={() =>
+                              respondConnectionMutation.mutate({
+                                connectionId: request.id,
+                                action: "accept",
+                              })
+                            }
+                          >
+                            <UserCheck className="size-4" />
+                            Confirm
+                          </Button>
+                          <Button
+                            variant="secondary"
+                            className="h-9 flex-1 rounded-lg"
+                            disabled={respondConnectionMutation.isPending}
+                            onClick={() =>
+                              respondConnectionMutation.mutate({
+                                connectionId: request.id,
+                                action: "decline",
+                              })
+                            }
+                          >
+                            <X className="size-4" />
+                            Decline
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {outgoingRequests.length > 0 && (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Waiting
+                    </p>
+                    {outgoingRequests.map((request) => (
+                      <div
+                        key={request.id}
+                        className="flex items-center gap-3 rounded-xl border border-border bg-background p-3"
+                      >
+                        <SocialProfileAvatar
+                          profile={request.otherUser}
+                          className="size-10"
+                        />
+                        <div className="min-w-0 flex-1">
+                          <p className="truncate font-medium text-foreground">
+                            {getProfileDisplayName(request.otherUser)}
+                          </p>
+                          <p className="text-sm text-muted-foreground">
+                            Request sent. Waiting for confirmation.
+                          </p>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
                 <div className="flex gap-3 rounded-xl border border-success/30 bg-success/10 p-4">
                   <ShieldCheck className="mt-0.5 size-5 shrink-0 text-success" />
                   <div>
@@ -919,11 +1417,63 @@ function Lobby() {
                     </p>
                   </div>
                 </div>
+                {socialNotifications.length > 0 ? (
+                  <div className="space-y-2">
+                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                      Recent
+                    </p>
+                    {socialNotifications.map((notification) => (
+                      <NotificationCard
+                        key={notification.id}
+                        notification={notification}
+                        onOpenConnection={(connectionId) => {
+                          const connection = socialConnections.find(
+                            (item) => item.id === connectionId,
+                          );
+                          if (!connection) return;
+                          setActiveConversationId(connection.id);
+                          setActivePanel("messages");
+                        }}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <EmptySocialCard
+                    icon={Bell}
+                    title="No alerts"
+                    body="Friend requests, accepted requests and new messages appear here."
+                  />
+                )}
               </div>
             )}
 
             {activePanel === "settings" && (
               <div className="space-y-4">
+                <div className="flex items-center gap-3 rounded-xl border border-border bg-background p-3">
+                  <Avatar className="size-12 border border-border">
+                    {avatarSrc && (
+                      <AvatarImage
+                        src={avatarSrc}
+                        alt={`${displayName} profile`}
+                        className="object-cover"
+                      />
+                    )}
+                    <AvatarFallback className="bg-primary/15 text-sm font-bold text-primary">
+                      {avatarInitials}
+                    </AvatarFallback>
+                  </Avatar>
+                  <div className="min-w-0">
+                    <p className="truncate font-semibold text-foreground">
+                      {displayName}
+                    </p>
+                    <p className="truncate text-sm text-muted-foreground">
+                      {profile?.username
+                        ? `@${profile.username}`
+                        : "Lume member"}
+                    </p>
+                  </div>
+                </div>
+
                 <div className="grid gap-3">
                   <SettingSwitch
                     icon={<EyeOff className="size-4 text-primary" />}
@@ -994,21 +1544,171 @@ function Lobby() {
 function IconHeaderButton({
   icon: Icon,
   label,
+  badgeCount = 0,
   onClick,
 }: {
   icon: LucideIcon;
   label: string;
+  badgeCount?: number;
   onClick: () => void;
 }) {
   return (
     <button
       type="button"
-      className="flex size-10 items-center justify-center rounded-xl border border-border bg-surface/80 text-foreground shadow-sm backdrop-blur transition hover:border-primary/60 hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      className="relative flex size-9 items-center justify-center rounded-lg border border-border bg-surface/80 text-foreground shadow-sm backdrop-blur transition hover:border-primary/60 hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       onClick={onClick}
     >
       <Icon className="size-4" />
       <span className="sr-only">{label}</span>
+      {badgeCount > 0 && (
+        <span className="absolute -right-1.5 -top-1.5 flex min-w-5 items-center justify-center rounded-full bg-primary px-1.5 text-[11px] font-bold leading-5 text-primary-foreground ring-2 ring-background">
+          {badgeCount > 9 ? "9+" : badgeCount}
+        </span>
+      )}
     </button>
+  );
+}
+
+function SocialProfileAvatar({
+  profile,
+  className,
+}: {
+  profile: PublicProfile | null;
+  className?: string;
+}) {
+  const name = getProfileDisplayName(profile);
+
+  return (
+    <Avatar className={cn("size-10 border border-border", className)}>
+      {profile?.avatar_url && (
+        <AvatarImage
+          src={profile.avatar_url}
+          alt={`${name} profile`}
+          className="object-cover"
+        />
+      )}
+      <AvatarFallback className="bg-primary/15 text-xs font-bold text-primary">
+        {getUserInitials(name)}
+      </AvatarFallback>
+    </Avatar>
+  );
+}
+
+function EmptySocialCard({
+  icon: Icon,
+  title,
+  body,
+  action,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  action?: ReactNode;
+}) {
+  return (
+    <div className="flex h-full min-h-44 flex-col items-center justify-center gap-3 rounded-xl border border-border bg-background p-4 text-center">
+      <div className="flex size-10 items-center justify-center rounded-xl bg-primary/15">
+        <Icon className="size-5 text-primary" />
+      </div>
+      <div>
+        <p className="font-medium text-foreground">{title}</p>
+        <p className="mt-1 max-w-xs text-sm text-muted-foreground">{body}</p>
+      </div>
+      {action}
+    </div>
+  );
+}
+
+function ConnectionListButton({
+  connection,
+  selected,
+  onClick,
+}: {
+  connection: SocialConnection;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  const name = getProfileDisplayName(connection.otherUser);
+
+  return (
+    <button
+      type="button"
+      className={cn(
+        "flex w-full items-center gap-3 rounded-xl border p-3 text-left transition",
+        selected
+          ? "border-primary bg-primary/10"
+          : "border-border bg-background hover:border-primary/60",
+      )}
+      onClick={onClick}
+    >
+      <SocialProfileAvatar profile={connection.otherUser} className="size-10" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2">
+          <p className="truncate font-medium text-foreground">{name}</p>
+          {connection.unreadCount > 0 && (
+            <span className="rounded-full bg-primary px-1.5 text-[11px] font-bold leading-5 text-primary-foreground">
+              {connection.unreadCount > 9 ? "9+" : connection.unreadCount}
+            </span>
+          )}
+        </div>
+        <p className="truncate text-sm text-muted-foreground">
+          {connection.lastMessage?.body || "Ready to message"}
+        </p>
+      </div>
+    </button>
+  );
+}
+
+function NotificationCard({
+  notification,
+  onOpenConnection,
+}: {
+  notification: Notification;
+  onOpenConnection: (connectionId: string) => void;
+}) {
+  const connectionId = getNotificationConnectionId(notification);
+
+  return (
+    <div className="rounded-xl border border-border bg-background p-3">
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15">
+          {notification.type === "direct_message" ? (
+            <MessageSquare className="size-4 text-primary" />
+          ) : notification.type === "connection_accepted" ? (
+            <UserCheck className="size-4 text-success" />
+          ) : (
+            <Bell className="size-4 text-primary" />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <div className="flex items-start justify-between gap-2">
+            <p className="font-medium text-foreground">{notification.title}</p>
+            {!notification.read_at && (
+              <span className="mt-1 size-2 shrink-0 rounded-full bg-primary" />
+            )}
+          </div>
+          {notification.body && (
+            <p className="mt-1 text-sm text-muted-foreground">
+              {notification.body}
+            </p>
+          )}
+          <div className="mt-2 flex items-center justify-between gap-2">
+            <p className="text-xs text-muted-foreground">
+              {formatSocialTime(notification.created_at)}
+            </p>
+            {connectionId && (
+              <Button
+                variant="secondary"
+                className="h-8 rounded-lg px-3 text-xs"
+                onClick={() => onOpenConnection(connectionId)}
+              >
+                Open
+              </Button>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -1030,25 +1730,55 @@ function StatMetric({
   return (
     <div
       className={cn(
-        "flex items-center gap-3 px-5 py-4",
+        "flex items-center gap-3 px-4 py-3",
         divider && "border-t border-border sm:border-l sm:border-t-0",
       )}
     >
       <div
         className={cn(
-          "flex size-10 shrink-0 items-center justify-center rounded-full border",
+          "flex size-9 shrink-0 items-center justify-center rounded-full border",
           iconClassName,
         )}
       >
-        <Icon className="size-5" />
+        <Icon className="size-4" />
       </div>
       <div className="min-w-0">
-        <p className="text-2xl font-black leading-none">{value}</p>
-        <p className={cn("mt-1 text-xs font-medium", labelClassName)}>
+        <p className="text-xl font-black leading-none">{value}</p>
+        <p className={cn("mt-0.5 text-xs font-medium", labelClassName)}>
           {label}
         </p>
       </div>
     </div>
+  );
+}
+
+function SectionToggleButton({
+  expanded,
+  hiddenCount,
+  onClick,
+}: {
+  expanded: boolean;
+  hiddenCount: number;
+  onClick: () => void;
+}) {
+  if (hiddenCount <= 0) return null;
+
+  const Icon = expanded ? ChevronUp : ChevronDown;
+
+  return (
+    <button
+      type="button"
+      className="inline-flex h-8 shrink-0 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold text-primary transition hover:bg-primary/10 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+      onClick={onClick}
+    >
+      {expanded ? "Show less" : "See all"}
+      {!expanded && (
+        <span className="rounded-full bg-primary/15 px-1.5 text-[11px] leading-5 text-primary">
+          {hiddenCount}
+        </span>
+      )}
+      <Icon className="size-3.5" />
+    </button>
   );
 }
 
@@ -1064,13 +1794,13 @@ function PanelHeading({
   subtitle: string;
 }) {
   return (
-    <div className="flex items-start gap-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-secondary/70">
-        <Icon className={cn("size-6", iconClassName)} />
+    <div className="flex min-w-0 items-start gap-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-secondary/70">
+        <Icon className={cn("size-5", iconClassName)} />
       </div>
       <div className="min-w-0">
-        <h2 className="text-xl font-bold leading-tight">{title}</h2>
-        <p className="mt-1 text-sm text-muted-foreground">{subtitle}</p>
+        <h2 className="text-lg font-bold leading-tight">{title}</h2>
+        <p className="mt-0.5 text-xs text-muted-foreground">{subtitle}</p>
       </div>
     </div>
   );
@@ -1097,14 +1827,14 @@ function LargeOptionButton({
       aria-pressed={selected}
       disabled={disabled}
       className={cn(
-        "flex min-h-12 items-center justify-center gap-2 rounded-xl border bg-secondary/55 px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+        "flex min-h-11 items-center justify-center gap-2 rounded-lg border bg-secondary/55 px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
         selected
           ? "border-primary bg-primary/15 text-foreground shadow-[0_0_24px_-16px_var(--primary)]"
           : "border-border text-foreground hover:border-primary/60 hover:bg-primary/10",
       )}
       onClick={onClick}
     >
-      <Icon className={cn("size-5 shrink-0", iconClassName)} />
+      <Icon className={cn("size-4 shrink-0", iconClassName)} />
       <span>{label}</span>
     </button>
   );
@@ -1131,7 +1861,7 @@ function TopicButton({
       aria-pressed={selected}
       disabled={disabled}
       className={cn(
-        "relative flex h-10 min-w-0 items-center gap-2 rounded-xl border bg-secondary/55 px-3 text-left text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+        "relative flex h-10 min-w-0 items-center gap-2.5 rounded-lg border bg-secondary/55 px-3 text-left text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
         selected
           ? "border-primary bg-primary/15 text-foreground"
           : "border-border text-foreground hover:border-primary/60 hover:bg-primary/10",
@@ -1141,8 +1871,8 @@ function TopicButton({
       <Icon className={cn("size-4 shrink-0", iconClassName)} />
       <span className="min-w-0 truncate">{label}</span>
       {selected && (
-        <span className="ml-auto flex size-5 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
-          <Check className="size-3" />
+        <span className="ml-auto flex size-4 shrink-0 items-center justify-center rounded-full bg-primary text-primary-foreground">
+          <Check className="size-2.5" />
         </span>
       )}
     </button>
@@ -1166,7 +1896,7 @@ function SegmentButton({
       aria-pressed={selected}
       disabled={disabled}
       className={cn(
-        "min-h-9 rounded-lg px-2 py-1.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
+        "min-h-8 rounded-lg px-2 py-1 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60",
         selected
           ? "border border-primary bg-primary/15 text-foreground shadow-[0_0_16px_-12px_var(--primary)]"
           : "border border-transparent text-foreground hover:border-primary/50 hover:bg-primary/10",
@@ -1177,7 +1907,6 @@ function SegmentButton({
     </button>
   );
 }
-
 
 function StatusNotice({
   icon: Icon,
@@ -1191,13 +1920,13 @@ function StatusNotice({
   detail: string;
 }) {
   return (
-    <section className="mt-4 flex items-center gap-3 rounded-[1.35rem] border border-primary/30 bg-primary/10 p-4">
-      <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/15">
-        <Icon className={cn("size-5", iconClassName)} />
+    <section className="mt-3 flex items-center gap-3 rounded-xl border border-primary/30 bg-primary/10 p-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15">
+        <Icon className={cn("size-4", iconClassName)} />
       </div>
       <div className="min-w-0">
-        <p className="font-semibold text-foreground">{title}</p>
-        <p className="text-sm text-muted-foreground">{detail}</p>
+        <p className="text-sm font-semibold text-foreground">{title}</p>
+        <p className="text-xs text-muted-foreground">{detail}</p>
       </div>
     </section>
   );
@@ -1215,9 +1944,9 @@ function SettingSwitch({
   onCheckedChange: (checked: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-4 rounded-xl border border-border bg-background p-4">
+    <label className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
       <span className="flex min-w-0 items-center gap-3">
-        <span className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15">
+        <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15">
           {icon}
         </span>
         <span className="truncate text-sm font-medium text-foreground">
@@ -1231,6 +1960,25 @@ function SettingSwitch({
 
 function formatCount(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function getNotificationConnectionId(notification: Notification) {
+  const data = notification.data;
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  return typeof data["connectionId"] === "string" ? data["connectionId"] : null;
+}
+
+function formatSocialTime(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function getTrendDotClassName(trend: LobbyTrend) {
+  return TRENDING_DOT_CLASSES[trend.label] ?? "bg-muted-foreground";
 }
 
 function formatCountryLabel(country: string | null | undefined) {

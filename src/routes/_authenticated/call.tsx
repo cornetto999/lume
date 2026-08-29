@@ -11,6 +11,7 @@ import {
   Clock3,
   Loader2,
   LogOut,
+  Maximize2,
   MessageCircle,
   MessageCircleQuestion,
   Mic,
@@ -23,6 +24,8 @@ import {
   Sparkles,
   StepForward,
   UserRound,
+  UserCheck,
+  UserPlus,
   Video,
   PictureInPicture2,
   X,
@@ -40,6 +43,7 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import { Label } from "@/components/ui/label";
+import { Slider } from "@/components/ui/slider";
 import {
   Select,
   SelectContent,
@@ -54,6 +58,7 @@ import { getMyProfile } from "@/lib/profile.functions";
 import {
   cancelMatching,
   endCurrentMatch,
+  findNextMatch,
   getMatchmakingState,
   startMatching,
   type MatchmakingState,
@@ -62,9 +67,15 @@ import { fileSafetyReport } from "@/lib/safety.functions";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_MATCH_PREFERENCES,
+  FAST_MATCH_AFTER_MS,
   REPORT_REASON_LABELS,
   type ReportReason,
 } from "@/types/models";
+import {
+  getCallConnectionState,
+  requestConnection,
+  respondConnection,
+} from "@/lib/social.functions";
 
 type CameraState = "off" | "starting" | "ready" | "blocked" | "unsupported";
 type RtcStatus =
@@ -89,6 +100,7 @@ type RtcSignalPayload = {
 
 const SIGNAL_EVENT = "webrtc_signal";
 const INTRO_SECONDS = 30;
+const SEARCH_REFETCH_INTERVAL_MS = 500;
 const ICEBREAKER_CARDS = [
   "What's your dream destination?",
   "Coffee or milk tea?",
@@ -100,6 +112,9 @@ const ICEBREAKER_CARDS = [
 const RTC_CONFIG: RTCConfiguration = {
   iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
 };
+const DEFAULT_SELF_CAMERA_MOBILE_HEIGHT = 220;
+const DEFAULT_SELF_CAMERA_DESKTOP_HEIGHT = 560;
+const DEFAULT_SELF_CAMERA_DESKTOP_WIDTH = 520;
 
 function isSignalPayload(value: unknown): value is RtcSignalPayload {
   if (!value || typeof value !== "object") return false;
@@ -139,6 +154,7 @@ function CallRoom() {
   const queryClient = useQueryClient();
   const videoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
+  const chatMessageCountRef = useRef(0);
   const { localStream, cameraError, isReady, startCamera, stopCamera } =
     useCamera();
   const cameraSupported =
@@ -156,6 +172,20 @@ function CallRoom() {
   const [blockAfterReport, setBlockAfterReport] = useState(false);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
+  const [chatUnreadCount, setChatUnreadCount] = useState(0);
+  const [sizeControlsOpen, setSizeControlsOpen] = useState(false);
+  const [cameraSizeMode, setCameraSizeMode] = useState<"equal" | "custom">(
+    "equal",
+  );
+  const [selfCameraMobileHeight, setSelfCameraMobileHeight] = useState(
+    DEFAULT_SELF_CAMERA_MOBILE_HEIGHT,
+  );
+  const [selfCameraDesktopHeight, setSelfCameraDesktopHeight] = useState(
+    DEFAULT_SELF_CAMERA_DESKTOP_HEIGHT,
+  );
+  const [selfCameraDesktopWidth, setSelfCameraDesktopWidth] = useState(
+    DEFAULT_SELF_CAMERA_DESKTOP_WIDTH,
+  );
 
   const { data: profile, isLoading: profileLoading } = useQuery({
     queryKey: ["my-profile"],
@@ -177,7 +207,8 @@ function CallRoom() {
     refetchInterval: (query) => {
       const s = query.state.data?.state;
       // Realtime handles instant match detection — polling is a safety net only
-      if (s === "searching" || s === "matched") return 1_500;
+      if (s === "searching") return SEARCH_REFETCH_INTERVAL_MS;
+      if (s === "matched") return 1_500;
       return false;
     },
   });
@@ -200,13 +231,31 @@ function CallRoom() {
         ? activeSession.user_b
         : activeSession.user_a
       : null;
+  const callConnectionQueryKey = [
+    "call-connection-state",
+    activeSession?.id,
+    partnerId,
+  ];
   const isOfferer = !!activeSession && activeSession.user_a === profile?.id;
+  const searchJoinedAt =
+    matchState?.state === "searching"
+      ? Date.parse(matchState.queue.joined_at)
+      : NaN;
+  const searchExpanded =
+    Number.isFinite(searchJoinedAt) &&
+    Date.now() - searchJoinedAt >= FAST_MATCH_AFTER_MS;
+  const searchWaitingForMember =
+    Number.isFinite(searchJoinedAt) && Date.now() - searchJoinedAt >= 6_000;
   const partnerName =
     matchState?.state === "matched"
       ? matchState.partner?.display_name ||
         matchState.partner?.username ||
         "Your match"
-      : "Finding match";
+      : searchWaitingForMember
+        ? "No new member yet"
+        : searchExpanded
+          ? "Expanding search"
+          : "Finding match";
   const roomName = activeSession
     ? activeSession.room_name.replace(/^lume-/, "").slice(0, 8)
     : null;
@@ -228,6 +277,23 @@ function CallRoom() {
     localStream: localStream,
     mediaReady: cameraState !== "starting" && cameraState !== "off",
     remoteVideoRef,
+  });
+
+  const { data: callConnection, isLoading: connectionLoading } = useQuery({
+    queryKey: callConnectionQueryKey,
+    queryFn: () => {
+      if (!activeSession?.id || !partnerId) {
+        throw new Error("No active call connection.");
+      }
+
+      return getCallConnectionState({
+        data: { sessionId: activeSession.id, partnerId },
+      });
+    },
+    enabled: status === "matched" && !!activeSession?.id && !!partnerId,
+    retry: 1,
+    throwOnError: false,
+    refetchInterval: status === "matched" ? 1_500 : false,
   });
   const roomMatchPreferences = () => ({
     ...DEFAULT_MATCH_PREFERENCES,
@@ -288,14 +354,11 @@ function CallRoom() {
 
   const nextMutation = useMutation({
     mutationFn: async () => {
-      if (matchState?.state === "matched") {
-        await endCurrentMatch();
-      }
       setMediaRequested(true);
       await startCamera();
       setCameraOn(true);
       setMicOn(true);
-      return startMatching({ data: roomMatchPreferences() });
+      return findNextMatch({ data: roomMatchPreferences() });
     },
     onSuccess: (state) => {
       setMatchState(state);
@@ -349,6 +412,47 @@ function CallRoom() {
       toast.error(error.message || "Could not send the report."),
   });
 
+  const requestConnectionMutation = useMutation({
+    mutationFn: () => {
+      if (!activeSession?.id || !partnerId) {
+        throw new Error("There is no active match to add.");
+      }
+
+      return requestConnection({
+        data: { sessionId: activeSession.id, partnerId },
+      });
+    },
+    onSuccess: (state) => {
+      queryClient.setQueryData(callConnectionQueryKey, state);
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      toast[state.state === "accepted" ? "success" : "info"](
+        state.state === "accepted"
+          ? "Friend added. You can message after the call."
+          : "Friend request sent. Waiting for confirmation.",
+      );
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not send the friend request."),
+  });
+
+  const respondConnectionMutation = useMutation({
+    mutationFn: () => {
+      const connectionId = callConnection?.connection?.id;
+      if (!connectionId) throw new Error("No friend request to confirm.");
+
+      return respondConnection({
+        data: { connectionId, action: "accept" },
+      });
+    },
+    onSuccess: (state) => {
+      queryClient.setQueryData(callConnectionQueryKey, state);
+      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      toast.success("Friend added. Messages are unlocked.");
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not confirm the friend request."),
+  });
+
   useEffect(() => {
     if (profile === undefined) return;
     if (!profile.profile_completed) {
@@ -376,7 +480,34 @@ function CallRoom() {
     setBlockAfterReport(false);
     setChatOpen(false);
     setChatInput("");
+    setChatUnreadCount(0);
+    chatMessageCountRef.current = 0;
   }, [activeSession?.id]);
+
+  useEffect(() => {
+    const previousCount = chatMessageCountRef.current;
+
+    if (chatMessages.length < previousCount) {
+      chatMessageCountRef.current = chatMessages.length;
+      return;
+    }
+
+    if (!chatOpen && profile?.id && chatMessages.length > previousCount) {
+      const unreadMessages = chatMessages
+        .slice(previousCount)
+        .filter((message) => message.senderId !== profile.id).length;
+
+      if (unreadMessages > 0) {
+        setChatUnreadCount((count) => Math.min(99, count + unreadMessages));
+      }
+    }
+
+    chatMessageCountRef.current = chatMessages.length;
+  }, [chatMessages, chatOpen, profile?.id]);
+
+  useEffect(() => {
+    if (chatOpen) setChatUnreadCount(0);
+  }, [chatOpen]);
 
   // Realtime: instantly detect when our queue entry is marked 'matched'.
   // The matchmaking_queue table is in the Realtime publication, so we get
@@ -421,6 +552,43 @@ function CallRoom() {
   const currentIcebreaker =
     ICEBREAKER_CARDS[icebreakerIndex % ICEBREAKER_CARDS.length];
   const canUseShield = status === "matched" && !!activeSession && !!partnerId;
+  const canSendChat = status === "matched";
+  const connectionState = callConnection?.state ?? "none";
+  const friendActionBusy =
+    requestConnectionMutation.isPending || respondConnectionMutation.isPending;
+  const chatMessageCount = chatMessages.length;
+  const chatBadgeCount = chatUnreadCount || chatMessageCount;
+  const chatButtonLabel =
+    chatUnreadCount > 0
+      ? `Live Chat, ${chatUnreadCount} unread`
+      : chatMessageCount > 0
+        ? `Live Chat, ${chatMessageCount} messages`
+        : "Live Chat";
+  const friendActionLabel =
+    connectionLoading && !callConnection
+      ? "Add friend"
+      : connectionState === "accepted"
+        ? "Friends"
+        : connectionState === "pending_incoming"
+          ? "Confirm"
+          : connectionState === "pending_outgoing"
+            ? "Requested"
+            : "Add friend";
+  const canUseFriendAction =
+    status === "matched" &&
+    !!activeSession?.id &&
+    !!partnerId &&
+    !friendActionBusy &&
+    (connectionState === "none" || connectionState === "pending_incoming");
+
+  const useFriendAction = () => {
+    if (connectionState === "pending_incoming") {
+      respondConnectionMutation.mutate();
+      return;
+    }
+
+    requestConnectionMutation.mutate();
+  };
 
   useEffect(() => {
     if (!introActive || introSecondsLeft <= 0) return;
@@ -526,6 +694,13 @@ function CallRoom() {
     startMutation.mutate();
   };
 
+  const resetCameraSize = () => {
+    setCameraSizeMode("equal");
+    setSelfCameraMobileHeight(DEFAULT_SELF_CAMERA_MOBILE_HEIGHT);
+    setSelfCameraDesktopHeight(DEFAULT_SELF_CAMERA_DESKTOP_HEIGHT);
+    setSelfCameraDesktopWidth(DEFAULT_SELF_CAMERA_DESKTOP_WIDTH);
+  };
+
   const matchStatusText =
     status === "matched"
       ? rtcStatus === "live"
@@ -536,7 +711,11 @@ function CallRoom() {
             ? "The video connection ended"
             : `Waiting for ${partnerName} to open the room`
       : status === "searching"
-        ? "Waiting for the next active member"
+        ? searchWaitingForMember
+          ? "Auto retrying for the next active member"
+          : searchExpanded
+            ? "Checking all active members"
+            : "Checking active members"
         : "Ready when you are";
   const busy =
     profileLoading ||
@@ -545,7 +724,14 @@ function CallRoom() {
     cancelMutation.isPending ||
     endMutation.isPending ||
     nextMutation.isPending ||
+    requestConnectionMutation.isPending ||
+    respondConnectionMutation.isPending ||
     safetyMutation.isPending;
+  const cameraLayoutStyle = {
+    "--self-camera-mobile-height": `${selfCameraMobileHeight}px`,
+    "--self-camera-desktop-height": `${selfCameraDesktopHeight}px`,
+    "--self-camera-desktop-width": `${selfCameraDesktopWidth}px`,
+  } as CSSProperties;
 
   return (
     <main className="min-h-screen bg-background">
@@ -576,8 +762,23 @@ function CallRoom() {
           </div>
         </header>
 
-        <section className="grid flex-1 grid-cols-1 gap-4 md:grid-cols-2">
-          <div className="relative order-2 h-[220px] min-h-[160px] overflow-hidden rounded-2xl border border-border bg-surface md:order-1 md:h-auto md:min-h-[320px]">
+        <section
+          className={cn(
+            "grid flex-1 grid-cols-1 gap-4",
+            cameraSizeMode === "custom"
+              ? "md:flex md:items-stretch"
+              : "md:grid-cols-2",
+          )}
+          style={cameraLayoutStyle}
+        >
+          <div
+            className={cn(
+              "relative order-2 h-[var(--self-camera-mobile-height)] min-h-[160px] overflow-hidden rounded-2xl border border-border bg-surface md:order-1 md:min-h-[320px]",
+              cameraSizeMode === "custom"
+                ? "md:h-[var(--self-camera-desktop-height)] md:w-[var(--self-camera-desktop-width)] md:min-w-[320px] md:max-w-[60%] md:shrink-0"
+                : "md:h-auto",
+            )}
+          >
             <video
               ref={videoRef}
               autoPlay
@@ -623,7 +824,12 @@ function CallRoom() {
             </div>
           </div>
 
-          <div className="relative order-1 min-h-[360px] overflow-hidden rounded-2xl border border-border bg-surface md:order-2 md:min-h-[320px]">
+          <div
+            className={cn(
+              "relative order-1 min-h-[360px] overflow-hidden rounded-2xl border border-border bg-surface md:order-2 md:min-h-[320px]",
+              cameraSizeMode === "custom" && "md:min-w-[260px] md:flex-1",
+            )}
+          >
             <video
               ref={remoteVideoRef}
               autoPlay
@@ -699,8 +905,6 @@ function CallRoom() {
           </div>
         </section>
 
-
-
         {status === "matched" && (
           <section className="grid gap-3 md:grid-cols-[1.1fr_0.9fr]">
             <div className="rounded-2xl border border-border bg-surface p-4">
@@ -720,18 +924,25 @@ function CallRoom() {
                       : "Both people tap Continue to keep the room going."}
                   </p>
                 </div>
-                <Button
-                  className="h-10 rounded-xl"
-                  disabled={introAccepted}
-                  onClick={continueIntro}
-                >
-                  {introAccepted ? (
+                {introComplete ? (
+                  <div className="inline-flex h-10 items-center gap-2 rounded-xl border border-success/25 bg-success/15 px-4 text-sm font-semibold text-success">
                     <Check className="size-4" />
-                  ) : (
-                    <Sparkles className="size-4" />
-                  )}
-                  {introAccepted ? "Waiting" : "Continue"}
-                </Button>
+                    Continued
+                  </div>
+                ) : (
+                  <Button
+                    className="h-10 rounded-xl"
+                    disabled={introAccepted}
+                    onClick={continueIntro}
+                  >
+                    {introAccepted ? (
+                      <Clock3 className="size-4" />
+                    ) : (
+                      <Sparkles className="size-4" />
+                    )}
+                    {introAccepted ? "Waiting" : "Continue"}
+                  </Button>
+                )}
               </div>
 
               <div className="mt-4 grid grid-cols-2 gap-2">
@@ -785,11 +996,41 @@ function CallRoom() {
           </section>
         )}
 
+        {status === "matched" && connectionState === "pending_incoming" && (
+          <section className="flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-primary/30 bg-primary/10 p-4">
+            <div className="flex items-center gap-3">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/15">
+                <UserPlus className="size-5 text-primary" />
+              </div>
+              <div>
+                <p className="font-medium text-foreground">
+                  Friend request from {partnerName}
+                </p>
+                <p className="text-sm text-muted-foreground">
+                  Confirm to save this person and message later.
+                </p>
+              </div>
+            </div>
+            <Button
+              className="h-10 rounded-xl"
+              disabled={!canUseFriendAction}
+              onClick={useFriendAction}
+            >
+              {respondConnectionMutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                <UserCheck className="size-4" />
+              )}
+              Confirm
+            </Button>
+          </section>
+        )}
+
         <footer className="flex flex-wrap items-center justify-center gap-3">
           <Button
             variant="secondary"
             className="h-12 rounded-full px-4"
-            disabled={busy || status === "searching"}
+            disabled={busy}
             onClick={() => nextMutation.mutate()}
           >
             {nextMutation.isPending ? (
@@ -799,11 +1040,52 @@ function CallRoom() {
             ) : (
               <StepForward className="size-5" />
             )}
-            <span className="hidden sm:inline">
-              {status === "matched" ? "Skip / Next" : "Next"}
-            </span>
-            <span className="sr-only sm:hidden">Next match</span>
+            <span className="hidden sm:inline">Next / Skip</span>
+            <span className="sr-only sm:hidden">Next / Skip match</span>
           </Button>
+          <Button
+            size="icon"
+            variant={chatOpen ? "default" : "secondary"}
+            className="relative size-12 rounded-full"
+            aria-label={chatButtonLabel}
+            onClick={() => {
+              setChatOpen((open) => !open);
+              setSizeControlsOpen(false);
+            }}
+          >
+            <MessageCircle className="size-5" />
+            <span
+              className={cn(
+                "absolute -right-1 -top-1 flex min-w-5 items-center justify-center rounded-full border-2 border-background px-1 text-[11px] font-bold leading-4",
+                chatUnreadCount > 0
+                  ? "bg-primary text-primary-foreground"
+                  : "bg-muted text-muted-foreground",
+              )}
+            >
+              {chatBadgeCount > 99 ? "99+" : chatBadgeCount}
+            </span>
+            <span className="sr-only">Live Chat</span>
+          </Button>
+          {status === "matched" && (
+            <Button
+              variant={connectionState === "accepted" ? "default" : "secondary"}
+              className="h-12 rounded-full px-4"
+              disabled={!canUseFriendAction}
+              onClick={useFriendAction}
+            >
+              {friendActionBusy ? (
+                <Loader2 className="size-5 animate-spin" />
+              ) : connectionState === "accepted" ? (
+                <UserCheck className="size-5" />
+              ) : connectionState === "pending_incoming" ? (
+                <Check className="size-5" />
+              ) : (
+                <UserPlus className="size-5" />
+              )}
+              <span className="hidden sm:inline">{friendActionLabel}</span>
+              <span className="sr-only sm:hidden">{friendActionLabel}</span>
+            </Button>
+          )}
           {status === "matched" && (
             <Button
               variant="secondary"
@@ -865,14 +1147,18 @@ function CallRoom() {
             </Button>
           )}
           <Button
-            size="icon"
-            variant={chatOpen ? "default" : "secondary"}
-            className="size-12 rounded-full"
-            disabled={status !== "matched"}
-            onClick={() => setChatOpen((o) => !o)}
+            variant={sizeControlsOpen ? "default" : "secondary"}
+            className="h-12 rounded-full px-4"
+            onClick={() => {
+              setSizeControlsOpen((open) => !open);
+              if (!sizeControlsOpen) {
+                setChatOpen(false);
+              }
+            }}
           >
-            <MessageCircle className="size-5" />
-            <span className="sr-only">Live Chat</span>
+            <Maximize2 className="size-5" />
+            <span className="hidden sm:inline">Size</span>
+            <span className="sr-only sm:hidden">Camera size</span>
           </Button>
           <Button
             variant="destructive"
@@ -885,6 +1171,78 @@ function CallRoom() {
             <span className="sr-only sm:hidden">Stop matching</span>
           </Button>
         </footer>
+
+        {sizeControlsOpen && (
+          <section className="fixed bottom-24 left-1/2 z-40 w-[min(calc(100vw-2rem),36rem)] -translate-x-1/2 rounded-2xl border border-border bg-surface/95 p-4 shadow-2xl backdrop-blur sm:bottom-28">
+            <div className="flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
+                <Maximize2 className="size-4 text-primary" />
+                You camera size
+              </div>
+              <div className="flex items-center gap-2">
+                <Button
+                  variant="secondary"
+                  className="h-8 rounded-lg px-3 text-xs"
+                  onClick={resetCameraSize}
+                >
+                  <RotateCcw className="size-3.5" />
+                  Reset
+                </Button>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  className="size-8 rounded-lg"
+                  onClick={() => setSizeControlsOpen(false)}
+                >
+                  <X className="size-4" />
+                  <span className="sr-only">Close camera size</span>
+                </Button>
+              </div>
+            </div>
+
+            <div className="mt-4 md:hidden">
+              <CameraSizeSlider
+                id="self-camera-mobile-height"
+                label="Height"
+                value={selfCameraMobileHeight}
+                min={160}
+                max={340}
+                step={20}
+                onChange={(value) => {
+                  setSelfCameraMobileHeight(value);
+                  setCameraSizeMode("custom");
+                }}
+              />
+            </div>
+
+            <div className="mt-4 hidden gap-4 md:grid md:grid-cols-2">
+              <CameraSizeSlider
+                id="self-camera-desktop-width"
+                label="Width"
+                value={selfCameraDesktopWidth}
+                min={320}
+                max={680}
+                step={20}
+                onChange={(value) => {
+                  setSelfCameraDesktopWidth(value);
+                  setCameraSizeMode("custom");
+                }}
+              />
+              <CameraSizeSlider
+                id="self-camera-desktop-height"
+                label="Height"
+                value={selfCameraDesktopHeight}
+                min={320}
+                max={720}
+                step={20}
+                onChange={(value) => {
+                  setSelfCameraDesktopHeight(value);
+                  setCameraSizeMode("custom");
+                }}
+              />
+            </div>
+          </section>
+        )}
 
         <Dialog open={shieldOpen} onOpenChange={setShieldOpen}>
           <DialogContent className="max-w-md rounded-2xl border-border bg-surface">
@@ -1003,7 +1361,9 @@ function CallRoom() {
             <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
               {chatMessages.length === 0 ? (
                 <p className="mt-4 text-center text-sm text-muted-foreground">
-                  No messages yet. Send a message to start!
+                  {canSendChat
+                    ? "No messages yet. Send a message to start!"
+                    : "Find a match to start live chat."}
                 </p>
               ) : (
                 chatMessages.map((msg, i) => {
@@ -1028,7 +1388,7 @@ function CallRoom() {
               className="flex gap-2 border-t border-border bg-muted/20 p-2"
               onSubmit={(e) => {
                 e.preventDefault();
-                if (!chatInput.trim()) return;
+                if (!canSendChat || !chatInput.trim()) return;
                 sendChatMessage(chatInput.trim());
                 setChatInput("");
               }}
@@ -1036,14 +1396,17 @@ function CallRoom() {
               <input
                 type="text"
                 className="flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
-                placeholder="Type a message..."
+                placeholder={
+                  canSendChat ? "Type a message..." : "Chat opens after a match"
+                }
+                disabled={!canSendChat}
                 value={chatInput}
                 onChange={(e) => setChatInput(e.target.value)}
               />
               <Button
                 type="submit"
                 size="icon"
-                disabled={!chatInput.trim()}
+                disabled={!canSendChat || !chatInput.trim()}
                 className="size-10 shrink-0 rounded-xl"
               >
                 <SendHorizontal className="size-4" />
@@ -1053,6 +1416,49 @@ function CallRoom() {
         )}
       </div>
     </main>
+  );
+}
+
+function CameraSizeSlider({
+  id,
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  value: number;
+  min: number;
+  max: number;
+  step: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <div className="space-y-3 rounded-xl border border-border bg-background/50 p-3">
+      <div className="flex items-center justify-between gap-3">
+        <Label id={`${id}-label`} className="text-sm text-foreground">
+          {label}
+        </Label>
+        <span className="shrink-0 text-xs font-medium text-muted-foreground">
+          {value}px
+        </span>
+      </div>
+      <Slider
+        aria-labelledby={`${id}-label`}
+        min={min}
+        max={max}
+        step={step}
+        value={[value]}
+        onValueChange={([nextValue]) => {
+          if (typeof nextValue === "number") {
+            onChange(nextValue);
+          }
+        }}
+      />
+    </div>
   );
 }
 

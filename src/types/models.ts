@@ -9,6 +9,8 @@ export type UserRole = Tables["user_roles"]["Row"];
 export type MatchmakingQueueEntry = Tables["matchmaking_queue"]["Row"];
 export type MatchCooldown = Tables["match_cooldowns"]["Row"];
 export type CallSession = Tables["call_sessions"]["Row"];
+export type Connection = Tables["connections"]["Row"];
+export type DirectMessage = Tables["direct_messages"]["Row"];
 export type Message = Tables["messages"]["Row"];
 export type Block = Tables["blocks"]["Row"];
 export type Report = Tables["reports"]["Row"];
@@ -53,9 +55,51 @@ export type MatchState =
   | "reconnecting"
   | "failed";
 
+export const FAST_MATCH_AFTER_MS = 1_200;
+
+export type LobbyTrend = {
+  label: string;
+  count: number;
+};
+
 export type LobbySnapshot = {
   onlineCount: number;
   searchingCount: number;
+  trendingVibes: LobbyTrend[];
+};
+
+export type ConnectionStatus =
+  "pending" | "accepted" | "declined" | "cancelled";
+
+export type ConnectionRequestState =
+  "none" | "pending_outgoing" | "pending_incoming" | "accepted";
+
+export type SocialConnection = {
+  id: string;
+  requester_id: string;
+  addressee_id: string;
+  session_id: string | null;
+  status: ConnectionStatus;
+  direction: "incoming" | "outgoing" | "accepted";
+  requested_at: string;
+  responded_at: string | null;
+  otherUser: PublicProfile | null;
+  lastMessage: DirectMessage | null;
+  unreadCount: number;
+};
+
+export type SocialSummary = {
+  connections: SocialConnection[];
+  pendingRequests: SocialConnection[];
+  messages: DirectMessage[];
+  notifications: Notification[];
+  unreadMessages: number;
+  unreadNotifications: number;
+};
+
+export type CallConnectionState = {
+  state: ConnectionRequestState;
+  connection: SocialConnection | null;
 };
 
 export type RecentCall = {

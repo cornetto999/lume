@@ -113,6 +113,88 @@ export type Database = {
         };
         Relationships: [];
       };
+      connections: {
+        Row: {
+          addressee_id: string;
+          created_at: string;
+          id: string;
+          requested_at: string;
+          requester_id: string;
+          responded_at: string | null;
+          session_id: string | null;
+          status: string;
+          updated_at: string;
+        };
+        Insert: {
+          addressee_id: string;
+          created_at?: string;
+          id?: string;
+          requested_at?: string;
+          requester_id: string;
+          responded_at?: string | null;
+          session_id?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Update: {
+          addressee_id?: string;
+          created_at?: string;
+          id?: string;
+          requested_at?: string;
+          requester_id?: string;
+          responded_at?: string | null;
+          session_id?: string | null;
+          status?: string;
+          updated_at?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "connections_session_id_fkey";
+            columns: ["session_id"];
+            isOneToOne: false;
+            referencedRelation: "call_sessions";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
+      direct_messages: {
+        Row: {
+          body: string;
+          connection_id: string;
+          created_at: string;
+          id: string;
+          read_at: string | null;
+          recipient_id: string;
+          sender_id: string;
+        };
+        Insert: {
+          body: string;
+          connection_id: string;
+          created_at?: string;
+          id?: string;
+          read_at?: string | null;
+          recipient_id: string;
+          sender_id: string;
+        };
+        Update: {
+          body?: string;
+          connection_id?: string;
+          created_at?: string;
+          id?: string;
+          read_at?: string | null;
+          recipient_id?: string;
+          sender_id?: string;
+        };
+        Relationships: [
+          {
+            foreignKeyName: "direct_messages_connection_id_fkey";
+            columns: ["connection_id"];
+            isOneToOne: false;
+            referencedRelation: "connections";
+            referencedColumns: ["id"];
+          },
+        ];
+      };
       match_cooldowns: {
         Row: {
           created_at: string;
@@ -467,6 +549,10 @@ export type Database = {
       is_blocked_pair: { Args: { _a: string; _b: string }; Returns: boolean };
       is_session_participant: {
         Args: { _session_id: string; _user_id: string };
+        Returns: boolean;
+      };
+      is_connection_participant: {
+        Args: { _connection_id: string; _user_id: string };
         Returns: boolean;
       };
       is_staff: { Args: { _user_id: string }; Returns: boolean };
