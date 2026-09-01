@@ -155,6 +155,9 @@ function CallRoom() {
   const videoRef = useRef<HTMLVideoElement>(null);
   const remoteVideoRef = useRef<HTMLVideoElement>(null);
   const chatMessageCountRef = useRef(0);
+  const autoFindAfterSkipRef = useRef(false);
+  const autoFindAttemptedRef = useRef(false);
+  const leavingRoomRef = useRef(false);
   const { localStream, cameraError, isReady, startCamera, stopCamera } =
     useCamera();
   const cameraSupported =
@@ -305,8 +308,21 @@ function CallRoom() {
     void queryClient.invalidateQueries({ queryKey: ["lobby-snapshot"] });
   };
 
+  const keepFindingAfterSkip = () => {
+    autoFindAfterSkipRef.current = true;
+    autoFindAttemptedRef.current = false;
+    leavingRoomRef.current = false;
+  };
+
+  const stopFindingAfterSkip = () => {
+    autoFindAfterSkipRef.current = false;
+    autoFindAttemptedRef.current = false;
+    leavingRoomRef.current = true;
+  };
+
   const startMutation = useMutation({
     mutationFn: async () => {
+      leavingRoomRef.current = false;
       setMediaRequested(true);
       await startCamera();
       setCameraOn(true);
@@ -322,6 +338,8 @@ function CallRoom() {
       );
     },
     onError: (error: Error) => {
+      autoFindAfterSkipRef.current = false;
+      autoFindAttemptedRef.current = false;
       setMediaRequested(false);
       stopCamera();
       toast.error(error.message || "Could not start matching.");
@@ -329,31 +347,42 @@ function CallRoom() {
   });
 
   const cancelMutation = useMutation({
-    mutationFn: () => cancelMatching(),
+    mutationFn: () => {
+      stopFindingAfterSkip();
+      return cancelMatching();
+    },
     onSuccess: (state) => {
       setMediaRequested(false);
       stopCamera();
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
-    onError: (error: Error) =>
-      toast.error(error.message || "Could not leave search."),
+    onError: (error: Error) => {
+      leavingRoomRef.current = false;
+      toast.error(error.message || "Could not leave search.");
+    },
   });
 
   const endMutation = useMutation({
-    mutationFn: () => endCurrentMatch(),
+    mutationFn: () => {
+      stopFindingAfterSkip();
+      return endCurrentMatch();
+    },
     onSuccess: (state) => {
       setMediaRequested(false);
       stopCamera();
       setMatchState(state);
       navigate({ to: "/lobby", replace: true });
     },
-    onError: (error: Error) =>
-      toast.error(error.message || "Could not end the match."),
+    onError: (error: Error) => {
+      leavingRoomRef.current = false;
+      toast.error(error.message || "Could not end the match.");
+    },
   });
 
   const nextMutation = useMutation({
     mutationFn: async () => {
+      keepFindingAfterSkip();
       setMediaRequested(true);
       await startCamera();
       setCameraOn(true);
@@ -362,6 +391,9 @@ function CallRoom() {
     },
     onSuccess: (state) => {
       setMatchState(state);
+      if (state.state !== "idle") {
+        autoFindAttemptedRef.current = false;
+      }
       toast[state.state === "matched" ? "success" : "info"](
         state.state === "matched"
           ? "Next match found."
@@ -369,6 +401,8 @@ function CallRoom() {
       );
     },
     onError: (error: Error) => {
+      autoFindAfterSkipRef.current = false;
+      autoFindAttemptedRef.current = false;
       setMediaRequested(false);
       stopCamera();
       toast.error(error.message || "Could not find the next match.");
@@ -403,6 +437,7 @@ function CallRoom() {
       void queryClient.invalidateQueries({ queryKey: ["matchmaking-state"] });
 
       if (result.blocked) {
+        stopFindingAfterSkip();
         setMediaRequested(false);
         stopCamera();
         navigate({ to: "/lobby", replace: true });
@@ -509,41 +544,113 @@ function CallRoom() {
     if (chatOpen) setChatUnreadCount(0);
   }, [chatOpen]);
 
-  // Realtime: instantly detect when our queue entry is marked 'matched'.
-  // The matchmaking_queue table is in the Realtime publication, so we get
-  // a server-push the moment another user's startMatching() claims us —
-  // eliminating the polling delay (was up to 2500ms, now near-zero).
   useEffect(() => {
-    if (!profile?.id || matchState?.state !== "searching") return;
+    if (status === "searching" || status === "matched") {
+      autoFindAttemptedRef.current = false;
+    }
+  }, [status]);
 
-    const channel = supabase
-      .channel(`queue-watch-${profile.id}`)
-      .on(
+  // Realtime keeps the call room in sync when a match is found, skipped, or
+  // ended by the other participant.
+  useEffect(() => {
+    if (!profile?.id) return;
+
+    type QueueWatchRow = {
+      status?: string;
+      session_id?: string | null;
+    };
+    type SessionWatchRow = {
+      status?: string;
+      end_reason?: string | null;
+    };
+
+    const invalidateMatchmakingState = () => {
+      void queryClient.invalidateQueries({
+        queryKey: ["matchmaking-state"],
+      });
+    };
+
+    const channel = supabase.channel(`queue-watch-${profile.id}`).on(
+      "postgres_changes",
+      {
+        event: "UPDATE",
+        schema: "public",
+        table: "matchmaking_queue",
+        filter: `user_id=eq.${profile.id}`,
+      },
+      (payload) => {
+        const row = payload.new as QueueWatchRow;
+        const previousRow = payload.old as QueueWatchRow | null;
+        const stateChanged =
+          row.status !== previousRow?.status ||
+          row.session_id !== previousRow?.session_id;
+
+        if (stateChanged) {
+          invalidateMatchmakingState();
+        }
+      },
+    );
+
+    if (activeSession?.id) {
+      channel.on(
         "postgres_changes",
         {
           event: "UPDATE",
           schema: "public",
-          table: "matchmaking_queue",
-          filter: `user_id=eq.${profile.id}`,
+          table: "call_sessions",
+          filter: `id=eq.${activeSession.id}`,
         },
         (payload) => {
-          const row = payload.new as { status: string };
-          // Only trigger a refetch if the row just became 'matched'.
-          // The server's getMatchmakingState will then resolve the full state
-          // (session, partner info, etc.) and update the React Query cache.
-          if (row.status === "matched") {
-            void queryClient.invalidateQueries({
-              queryKey: ["matchmaking-state"],
-            });
+          const row = payload.new as SessionWatchRow;
+
+          if (row.status === "ended" && row.end_reason === "skipped") {
+            autoFindAfterSkipRef.current = true;
+            autoFindAttemptedRef.current = false;
+            leavingRoomRef.current = false;
+          }
+
+          if (row.status === "ended" || row.status === "failed") {
+            invalidateMatchmakingState();
           }
         },
-      )
-      .subscribe();
+      );
+    }
+
+    channel.subscribe();
 
     return () => {
       void supabase.removeChannel(channel);
     };
-  }, [profile?.id, matchState?.state, queryClient]);
+  }, [activeSession?.id, profile?.id, queryClient]);
+
+  useEffect(() => {
+    if (!profile?.profile_completed || status !== "idle") return;
+    if (!autoFindAfterSkipRef.current || autoFindAttemptedRef.current) return;
+    if (leavingRoomRef.current) return;
+    if (
+      matchLoading ||
+      startMutation.isPending ||
+      nextMutation.isPending ||
+      cancelMutation.isPending ||
+      endMutation.isPending ||
+      safetyMutation.isPending
+    ) {
+      return;
+    }
+
+    autoFindAttemptedRef.current = true;
+    nextMutation.mutate();
+  }, [
+    cancelMutation.isPending,
+    endMutation.isPending,
+    matchLoading,
+    nextMutation,
+    nextMutation.isPending,
+    profile?.profile_completed,
+    safetyMutation.isPending,
+    startMutation.isPending,
+    status,
+  ]);
 
   const introComplete =
     status === "matched" && introAccepted && partnerIntroReady;
@@ -883,6 +990,12 @@ function CallRoom() {
                 )}
               </div>
             )}
+            <div
+              aria-hidden="true"
+              className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 select-none text-sm font-semibold text-muted-foreground/30"
+            >
+              lume
+            </div>
             <div className="absolute left-4 top-4 rounded-full bg-background/80 px-3 py-1 text-sm font-medium text-foreground backdrop-blur">
               Match
             </div>
@@ -1028,20 +1141,18 @@ function CallRoom() {
 
         <footer className="flex flex-wrap items-center justify-center gap-3">
           <Button
-            variant="secondary"
+            variant={sizeControlsOpen ? "default" : "secondary"}
             className="h-12 rounded-full px-4"
-            disabled={busy}
-            onClick={() => nextMutation.mutate()}
+            onClick={() => {
+              setSizeControlsOpen((open) => !open);
+              if (!sizeControlsOpen) {
+                setChatOpen(false);
+              }
+            }}
           >
-            {nextMutation.isPending ? (
-              <Loader2 className="size-5 animate-spin" />
-            ) : status === "matched" ? (
-              <SkipForward className="size-5" />
-            ) : (
-              <StepForward className="size-5" />
-            )}
-            <span className="hidden sm:inline">Next / Skip</span>
-            <span className="sr-only sm:hidden">Next / Skip match</span>
+            <Maximize2 className="size-5" />
+            <span className="hidden sm:inline">Size</span>
+            <span className="sr-only sm:hidden">Camera size</span>
           </Button>
           <Button
             size="icon"
@@ -1147,18 +1258,20 @@ function CallRoom() {
             </Button>
           )}
           <Button
-            variant={sizeControlsOpen ? "default" : "secondary"}
+            variant="secondary"
             className="h-12 rounded-full px-4"
-            onClick={() => {
-              setSizeControlsOpen((open) => !open);
-              if (!sizeControlsOpen) {
-                setChatOpen(false);
-              }
-            }}
+            disabled={busy}
+            onClick={() => nextMutation.mutate()}
           >
-            <Maximize2 className="size-5" />
-            <span className="hidden sm:inline">Size</span>
-            <span className="sr-only sm:hidden">Camera size</span>
+            {nextMutation.isPending ? (
+              <Loader2 className="size-5 animate-spin" />
+            ) : status === "matched" ? (
+              <SkipForward className="size-5" />
+            ) : (
+              <StepForward className="size-5" />
+            )}
+            <span className="hidden sm:inline">Next / Skip</span>
+            <span className="sr-only sm:hidden">Next / Skip match</span>
           </Button>
           <Button
             variant="destructive"

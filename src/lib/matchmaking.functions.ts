@@ -62,6 +62,7 @@ const ACTIVE_SESSION_STATUSES: Array<CallSession["status"]> = [
 ];
 const SEARCH_STALE_MS = 90_000;
 const REMATCH_COOLDOWN_MS = 5_000;
+const MATCH_FINALIZING_STALE_MS = 10_000;
 const MAX_MATCH_TOPICS = 5;
 
 const languageValues = new Set<string>(
@@ -80,6 +81,13 @@ const matchPreferencesInputSchema = z
 const idleState = (): MatchmakingState => ({
   state: "idle",
   queue: null,
+  session: null,
+  partner: null,
+});
+
+const searchingState = (queue: QueueEntry): MatchmakingState => ({
+  state: "searching",
+  queue,
   session: null,
   partner: null,
 });
@@ -359,6 +367,114 @@ async function endQueueSession(
   if (sessionUpdate.error) throw new Error(sessionUpdate.error.message);
   if (queueUpdate.error) throw new Error(queueUpdate.error.message);
   if (profileUpdate.error) throw new Error(profileUpdate.error.message);
+
+  if (endReason === "skipped") {
+    const expiresAt = new Date(Date.now() + REMATCH_COOLDOWN_MS).toISOString();
+    const { error: cooldownError } = await supabaseAdmin
+      .from("match_cooldowns")
+      .upsert(
+        [
+          {
+            user_id: session.user_a,
+            other_user_id: session.user_b,
+            expires_at: expiresAt,
+          },
+          {
+            user_id: session.user_b,
+            other_user_id: session.user_a,
+            expires_at: expiresAt,
+          },
+        ],
+        { onConflict: "user_id,other_user_id" },
+      );
+    if (cooldownError) throw new Error(cooldownError.message);
+  }
+}
+
+async function recoverInactiveMatchedQueue(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+  queue: QueueEntry,
+  session: CallSession | null,
+) {
+  const sessionId = queue.session_id;
+  if (!sessionId) {
+    return recoverStalledFinalizingMatch(supabaseAdmin, userId, queue);
+  }
+
+  const shouldKeepSearching =
+    session?.status === "ended" && session.end_reason === "skipped";
+  const now = new Date().toISOString();
+  const nextQueueStatus: QueueEntry["status"] = shouldKeepSearching
+    ? "searching"
+    : "cancelled";
+  const nextPresence: Profile["presence"] = shouldKeepSearching
+    ? "searching"
+    : "online";
+  const queueUpdates = {
+    status: nextQueueStatus,
+    session_id: null,
+    heartbeat_at: now,
+    ...(shouldKeepSearching ? { joined_at: now } : {}),
+  } satisfies Partial<QueueEntry>;
+
+  const { data, error } = await supabaseAdmin
+    .from("matchmaking_queue")
+    .update(queueUpdates)
+    .eq("user_id", userId)
+    .eq("status", "matched")
+    .eq("session_id", sessionId)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) return hydrateMatchState(supabaseAdmin, userId);
+
+  const { error: presenceError } = await supabaseAdmin
+    .from("profiles")
+    .update({ presence: nextPresence, last_active_at: now })
+    .eq("id", userId);
+  if (presenceError) throw new Error(presenceError.message);
+
+  return shouldKeepSearching ? searchingState(data) : idleState();
+}
+
+async function recoverStalledFinalizingMatch(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+  queue: QueueEntry,
+) {
+  const heartbeatTime = Date.parse(queue.heartbeat_at);
+  if (
+    Number.isFinite(heartbeatTime) &&
+    Date.now() - heartbeatTime < MATCH_FINALIZING_STALE_MS
+  ) {
+    return searchingState(queue);
+  }
+
+  const now = new Date().toISOString();
+  const { data, error } = await supabaseAdmin
+    .from("matchmaking_queue")
+    .update({
+      status: "searching",
+      session_id: null,
+      joined_at: now,
+      heartbeat_at: now,
+    })
+    .eq("user_id", userId)
+    .eq("status", "matched")
+    .is("session_id", null)
+    .select("*")
+    .maybeSingle();
+  if (error) throw new Error(error.message);
+  if (!data) return hydrateMatchState(supabaseAdmin, userId);
+
+  const { error: presenceError } = await supabaseAdmin
+    .from("profiles")
+    .update({ presence: "searching", last_active_at: now })
+    .eq("id", userId);
+  if (presenceError) throw new Error(presenceError.message);
+
+  return searchingState(data);
 }
 
 async function hydrateMatchState(
@@ -369,7 +485,11 @@ async function hydrateMatchState(
   const queue = queueEntry ?? (await getOwnQueueEntry(supabaseAdmin, userId));
   if (!queue || queue.status === "cancelled") return idleState();
 
-  if (queue.status === "matched" && queue.session_id) {
+  if (queue.status === "matched") {
+    if (!queue.session_id) {
+      return recoverStalledFinalizingMatch(supabaseAdmin, userId, queue);
+    }
+
     const session = await getSession(supabaseAdmin, queue.session_id);
     if (isActiveSession(session)) {
       const partner = await getPartnerSummary(
@@ -384,16 +504,7 @@ async function hydrateMatchState(
       };
     }
 
-    const { error: staleMatchError } = await supabaseAdmin
-      .from("matchmaking_queue")
-      .update({
-        status: "cancelled",
-        session_id: null,
-        heartbeat_at: new Date().toISOString(),
-      })
-      .eq("user_id", userId);
-    if (staleMatchError) throw new Error(staleMatchError.message);
-    return idleState();
+    return recoverInactiveMatchedQueue(supabaseAdmin, userId, queue, session);
   }
 
   if (queue.status === "searching") {
@@ -417,12 +528,7 @@ async function hydrateMatchState(
         .eq("id", userId);
       if (presenceError) throw new Error(presenceError.message);
 
-      return {
-        state: "searching",
-        queue: data,
-        session: null,
-        partner: null,
-      };
+      return searchingState(data);
     }
 
     const { error: staleSearchError } = await supabaseAdmin
@@ -717,7 +823,7 @@ export const getMatchmakingState = createServerFn({ method: "GET" })
     const supabaseAdmin = await getSupabaseAdminClient();
     const state = await hydrateMatchState(supabaseAdmin, context.userId);
 
-    if (state.state === "searching") {
+    if (state.state === "searching" && state.queue.status === "searching") {
       return tryCreateMatch(supabaseAdmin, context.userId);
     }
 
