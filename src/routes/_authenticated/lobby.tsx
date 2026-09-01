@@ -1,4 +1,4 @@
-import { type ReactNode, useEffect, useMemo, useState } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
@@ -91,9 +91,11 @@ import {
   LANGUAGE_OPTIONS,
   VIBE_OPTIONS,
   type CountryMatchMode,
+  type DirectMessage,
   type Notification,
   type PublicProfile,
   type SocialConnection,
+  type SocialSummary,
   type LobbyTrend,
   type VibeOption,
 } from "@/types/models";
@@ -118,6 +120,9 @@ type TopicCard = {
 const HERO_MATCH_IMAGE = "/lume-assets/hero-match.png";
 const DEFAULT_TOPIC_SELECTION = ["Music", "Developers"];
 const DEFAULT_VISIBLE_TREND_COUNT = 4;
+const SOCIAL_SUMMARY_QUERY_KEY = ["social-summary"] as const;
+const SOCIAL_MESSAGE_CACHE_LIMIT = 120;
+const OPTIMISTIC_MESSAGE_PREFIX = "optimistic-message";
 const DEFAULT_VISIBLE_VIBE_COUNT = 2;
 const DEFAULT_VISIBLE_TOPIC_COUNT = 6;
 
@@ -271,6 +276,238 @@ function getProfileDisplayName(profile: PublicProfile | null | undefined) {
   return profile?.display_name || profile?.username || "Lume friend";
 }
 
+function getConnectionOtherUserId(
+  connection: Pick<SocialConnection, "requester_id" | "addressee_id">,
+  currentUserId: string,
+) {
+  return connection.requester_id === currentUserId
+    ? connection.addressee_id
+    : connection.requester_id;
+}
+
+function getMessageTime(message: Pick<DirectMessage, "created_at"> | null) {
+  return message ? Date.parse(message.created_at) || 0 : 0;
+}
+
+function getConnectionActivityTime(connection: SocialConnection) {
+  return (
+    getMessageTime(connection.lastMessage) ||
+    Date.parse(connection.responded_at ?? connection.requested_at) ||
+    0
+  );
+}
+
+function sortSocialConnections(connections: SocialConnection[]) {
+  return [...connections].sort(
+    (a, b) => getConnectionActivityTime(b) - getConnectionActivityTime(a),
+  );
+}
+
+function getNewestDirectMessage(
+  messages: Array<DirectMessage | null | undefined>,
+) {
+  return messages.reduce<DirectMessage | null>((newest, message) => {
+    if (!message) return newest;
+    return getMessageTime(message) > getMessageTime(newest) ? message : newest;
+  }, null);
+}
+
+function isUnreadForUser(message: DirectMessage | null, currentUserId: string) {
+  return (
+    !!message && message.recipient_id === currentUserId && !message.read_at
+  );
+}
+
+function isMatchingOptimisticMessage(
+  optimisticMessage: DirectMessage,
+  confirmedMessage: DirectMessage,
+) {
+  if (!optimisticMessage.id.startsWith(OPTIMISTIC_MESSAGE_PREFIX)) {
+    return false;
+  }
+
+  return (
+    optimisticMessage.connection_id === confirmedMessage.connection_id &&
+    optimisticMessage.sender_id === confirmedMessage.sender_id &&
+    optimisticMessage.recipient_id === confirmedMessage.recipient_id &&
+    optimisticMessage.body === confirmedMessage.body &&
+    Math.abs(
+      getMessageTime(optimisticMessage) - getMessageTime(confirmedMessage),
+    ) < 30_000
+  );
+}
+
+function createOptimisticMessage(
+  summary: SocialSummary | undefined,
+  connectionId: string,
+  currentUserId: string | undefined,
+  body: string,
+): DirectMessage | null {
+  if (!summary || !currentUserId) return null;
+
+  const connection = summary.connections.find(
+    (item) => item.id === connectionId,
+  );
+  if (!connection) return null;
+
+  return {
+    id: `${OPTIMISTIC_MESSAGE_PREFIX}-${connectionId}-${Date.now()}`,
+    connection_id: connectionId,
+    sender_id: currentUserId,
+    recipient_id: getConnectionOtherUserId(connection, currentUserId),
+    body,
+    created_at: new Date().toISOString(),
+    read_at: null,
+  };
+}
+
+function upsertSummaryMessage(
+  summary: SocialSummary | undefined,
+  message: DirectMessage,
+  {
+    activeConnectionId,
+    currentUserId,
+    replaceId,
+  }: {
+    activeConnectionId: string | null;
+    currentUserId: string;
+    replaceId?: string | undefined;
+  },
+): SocialSummary | undefined {
+  if (!summary) return summary;
+
+  const existingMessage =
+    summary.messages.find((item) => item.id === message.id) ??
+    (replaceId
+      ? summary.messages.find((item) => item.id === replaceId)
+      : undefined);
+  const visibleMessage =
+    message.connection_id === activeConnectionId &&
+    isUnreadForUser(message, currentUserId)
+      ? { ...message, read_at: new Date().toISOString() }
+      : message;
+  const wasUnread = isUnreadForUser(existingMessage ?? null, currentUserId);
+  const isUnread = isUnreadForUser(visibleMessage, currentUserId);
+
+  const messages = [
+    ...summary.messages.filter((item) => {
+      if (item.id === visibleMessage.id) return false;
+      if (replaceId && item.id === replaceId) return false;
+      return !isMatchingOptimisticMessage(item, visibleMessage);
+    }),
+    visibleMessage,
+  ]
+    .sort((a, b) => getMessageTime(a) - getMessageTime(b))
+    .slice(-SOCIAL_MESSAGE_CACHE_LIMIT);
+
+  const connections = sortSocialConnections(
+    summary.connections.map((connection) => {
+      if (connection.id !== visibleMessage.connection_id) return connection;
+
+      const lastMessage = getNewestDirectMessage([
+        connection.lastMessage &&
+        connection.lastMessage.id !== replaceId &&
+        !isMatchingOptimisticMessage(connection.lastMessage, visibleMessage)
+          ? connection.lastMessage
+          : null,
+        ...messages.filter((item) => item.connection_id === connection.id),
+      ]);
+      const unreadDelta = Number(isUnread) - Number(wasUnread);
+
+      return {
+        ...connection,
+        lastMessage,
+        unreadCount:
+          connection.id === activeConnectionId
+            ? 0
+            : Math.max(0, connection.unreadCount + unreadDelta),
+      };
+    }),
+  );
+
+  return {
+    ...summary,
+    connections,
+    messages,
+    unreadMessages: connections.reduce(
+      (total, connection) => total + connection.unreadCount,
+      0,
+    ),
+  };
+}
+
+function markSummaryConnectionRead(
+  summary: SocialSummary | undefined,
+  connectionId: string,
+  currentUserId: string | undefined,
+): SocialSummary | undefined {
+  if (!summary || !currentUserId) return summary;
+
+  const readAt = new Date().toISOString();
+  const messages = summary.messages.map((message) =>
+    message.connection_id === connectionId &&
+    message.recipient_id === currentUserId &&
+    !message.read_at
+      ? { ...message, read_at: readAt }
+      : message,
+  );
+  const connections = summary.connections.map((connection) =>
+    connection.id === connectionId
+      ? { ...connection, unreadCount: 0 }
+      : connection,
+  );
+
+  return {
+    ...summary,
+    connections,
+    messages,
+    unreadMessages: connections.reduce(
+      (total, connection) => total + connection.unreadCount,
+      0,
+    ),
+  };
+}
+
+function removeSummaryMessage(
+  summary: SocialSummary | undefined,
+  message: DirectMessage,
+  currentUserId: string,
+): SocialSummary | undefined {
+  if (!summary) return summary;
+
+  const messages = summary.messages.filter((item) => item.id !== message.id);
+  const connections = sortSocialConnections(
+    summary.connections.map((connection) => {
+      if (connection.id !== message.connection_id) return connection;
+
+      const lastMessage = getNewestDirectMessage(
+        messages.filter((item) => item.connection_id === connection.id),
+      );
+
+      return {
+        ...connection,
+        lastMessage:
+          connection.lastMessage?.id === message.id
+            ? lastMessage
+            : connection.lastMessage,
+        unreadCount: isUnreadForUser(message, currentUserId)
+          ? Math.max(0, connection.unreadCount - 1)
+          : connection.unreadCount,
+      };
+    }),
+  );
+
+  return {
+    ...summary,
+    connections,
+    messages,
+    unreadMessages: connections.reduce(
+      (total, connection) => total + connection.unreadCount,
+      0,
+    ),
+  };
+}
+
 export const Route = createFileRoute("/_authenticated/lobby")({
   ssr: false,
   head: () => ({
@@ -310,6 +547,12 @@ function Lobby() {
     string | null
   >(null);
   const [directMessageInput, setDirectMessageInput] = useState("");
+  const activePanelRef = useRef<LobbyPanel | null>(null);
+  const activeConversationIdRef = useRef<string | null>(null);
+  const conversationScrollRef = useRef<HTMLDivElement | null>(null);
+  const markConnectionMessagesReadRef = useRef<(connectionId: string) => void>(
+    () => undefined,
+  );
 
   const {
     data: profile,
@@ -344,7 +587,7 @@ function Lobby() {
   const status = matchState?.state ?? "idle";
 
   const { data: socialSummary, isLoading: socialLoading } = useQuery({
-    queryKey: ["social-summary"],
+    queryKey: SOCIAL_SUMMARY_QUERY_KEY,
     queryFn: () => getSocialSummary(),
     enabled: !!profile?.profile_completed,
     retry: 1,
@@ -361,7 +604,9 @@ function Lobby() {
       action: "accept" | "decline";
     }) => respondConnection({ data: { connectionId, action } }),
     onSuccess: (state, variables) => {
-      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      void queryClient.invalidateQueries({
+        queryKey: SOCIAL_SUMMARY_QUERY_KEY,
+      });
       if (variables.action === "accept" && state.connection) {
         setActiveConversationId(state.connection.id);
         setActivePanel("messages");
@@ -382,28 +627,107 @@ function Lobby() {
       connectionId: string;
       body: string;
     }) => sendConnectionMessage({ data: { connectionId, body } }),
-    onSuccess: () => {
+    onMutate: async (variables) => {
+      await queryClient.cancelQueries({ queryKey: SOCIAL_SUMMARY_QUERY_KEY });
+      const optimisticMessage = createOptimisticMessage(
+        queryClient.getQueryData<SocialSummary>(SOCIAL_SUMMARY_QUERY_KEY),
+        variables.connectionId,
+        profile?.id,
+        variables.body,
+      );
+
       setDirectMessageInput("");
-      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      if (optimisticMessage && profile?.id) {
+        queryClient.setQueryData<SocialSummary>(
+          SOCIAL_SUMMARY_QUERY_KEY,
+          (current) =>
+            upsertSummaryMessage(current, optimisticMessage, {
+              activeConnectionId: activeConversationIdRef.current,
+              currentUserId: profile.id,
+            }),
+        );
+      }
+
+      return {
+        body: variables.body,
+        optimisticMessage,
+      };
     },
-    onError: (error: Error) =>
-      toast.error(error.message || "Could not send the message."),
+    onSuccess: (message, _variables, context) => {
+      if (profile?.id) {
+        queryClient.setQueryData<SocialSummary>(
+          SOCIAL_SUMMARY_QUERY_KEY,
+          (current) =>
+            upsertSummaryMessage(current, message, {
+              activeConnectionId: activeConversationIdRef.current,
+              currentUserId: profile.id,
+              replaceId: context?.optimisticMessage?.id,
+            }),
+        );
+      }
+      void queryClient.invalidateQueries({
+        queryKey: SOCIAL_SUMMARY_QUERY_KEY,
+      });
+    },
+    onError: (error: Error, _variables, context) => {
+      if (context?.optimisticMessage && profile?.id) {
+        const optimisticMessage = context.optimisticMessage;
+        queryClient.setQueryData<SocialSummary>(
+          SOCIAL_SUMMARY_QUERY_KEY,
+          (current) =>
+            removeSummaryMessage(current, optimisticMessage, profile.id),
+        );
+      }
+      setDirectMessageInput((current) => current || context?.body || "");
+      toast.error(error.message || "Could not send the message.");
+    },
   });
 
   const markNotificationsMutation = useMutation({
     mutationFn: () => markNotificationsRead(),
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      void queryClient.invalidateQueries({
+        queryKey: SOCIAL_SUMMARY_QUERY_KEY,
+      });
     },
   });
 
   const markConnectionMessagesReadMutation = useMutation({
     mutationFn: (connectionId: string) =>
       markConnectionMessagesRead({ data: { connectionId } }),
+    onMutate: async (connectionId) => {
+      await queryClient.cancelQueries({ queryKey: SOCIAL_SUMMARY_QUERY_KEY });
+      const previousSummary = queryClient.getQueryData<SocialSummary>(
+        SOCIAL_SUMMARY_QUERY_KEY,
+      );
+
+      queryClient.setQueryData<SocialSummary>(
+        SOCIAL_SUMMARY_QUERY_KEY,
+        (current) =>
+          markSummaryConnectionRead(current, connectionId, profile?.id),
+      );
+
+      return { previousSummary };
+    },
     onSuccess: () => {
-      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      void queryClient.invalidateQueries({
+        queryKey: SOCIAL_SUMMARY_QUERY_KEY,
+      });
+    },
+    onError: (_error, _connectionId, context) => {
+      if (context?.previousSummary) {
+        queryClient.setQueryData(
+          SOCIAL_SUMMARY_QUERY_KEY,
+          context.previousSummary,
+        );
+      }
     },
   });
+
+  useEffect(() => {
+    markConnectionMessagesReadRef.current =
+      markConnectionMessagesReadMutation.mutate;
+  }, [markConnectionMessagesReadMutation.mutate]);
 
   useEffect(() => {
     if (profileLoading) return;
@@ -559,7 +883,56 @@ function Lobby() {
     if (!userId) return;
 
     const invalidateSocial = () => {
-      void queryClient.invalidateQueries({ queryKey: ["social-summary"] });
+      void queryClient.invalidateQueries({
+        queryKey: SOCIAL_SUMMARY_QUERY_KEY,
+      });
+    };
+    const syncDirectMessage = (payload: unknown) => {
+      const change = payload as {
+        eventType?: string;
+        new?: Partial<DirectMessage>;
+        old?: Partial<DirectMessage>;
+      };
+      const activeConnectionId =
+        activePanelRef.current === "messages"
+          ? activeConversationIdRef.current
+          : null;
+
+      if (change.eventType === "DELETE" && change.old?.id) {
+        queryClient.setQueryData<SocialSummary>(
+          SOCIAL_SUMMARY_QUERY_KEY,
+          (current) =>
+            removeSummaryMessage(current, change.old as DirectMessage, userId),
+        );
+        invalidateSocial();
+        return;
+      }
+
+      if (!change.new?.id) {
+        invalidateSocial();
+        return;
+      }
+
+      const message = change.new as DirectMessage;
+      queryClient.setQueryData<SocialSummary>(
+        SOCIAL_SUMMARY_QUERY_KEY,
+        (current) =>
+          upsertSummaryMessage(current, message, {
+            activeConnectionId,
+            currentUserId: userId,
+          }),
+      );
+
+      if (
+        message.recipient_id === userId &&
+        !message.read_at &&
+        message.connection_id === activeConnectionId
+      ) {
+        markConnectionMessagesReadRef.current(message.connection_id);
+        return;
+      }
+
+      invalidateSocial();
     };
     const channel = supabase
       .channel(`lobby-social-watch-${userId}`)
@@ -591,7 +964,7 @@ function Lobby() {
           table: "direct_messages",
           filter: `sender_id=eq.${userId}`,
         },
-        invalidateSocial,
+        syncDirectMessage,
       )
       .on(
         "postgres_changes",
@@ -601,7 +974,7 @@ function Lobby() {
           table: "direct_messages",
           filter: `recipient_id=eq.${userId}`,
         },
-        invalidateSocial,
+        syncDirectMessage,
       )
       .on(
         "postgres_changes",
@@ -658,6 +1031,25 @@ function Lobby() {
         : [],
     [activeConversation, socialSummary?.messages],
   );
+
+  useEffect(() => {
+    activePanelRef.current = activePanel;
+  }, [activePanel]);
+
+  useEffect(() => {
+    activeConversationIdRef.current = activeConversation?.id ?? null;
+  }, [activeConversation?.id]);
+
+  useEffect(() => {
+    if (activePanel !== "messages") return;
+    const messageList = conversationScrollRef.current;
+    if (!messageList) return;
+
+    window.requestAnimationFrame(() => {
+      messageList.scrollTop = messageList.scrollHeight;
+    });
+  }, [activeConversation?.id, activePanel, conversationMessages.length]);
+
   const messageBadgeCount = socialSummary?.unreadMessages ?? 0;
   const alertBadgeCount = Math.max(
     socialSummary?.unreadNotifications ?? 0,
@@ -1160,7 +1552,7 @@ function Lobby() {
         >
           <DialogContent
             className={cn(
-              "rounded-2xl border-border bg-surface",
+              "max-h-[calc(100dvh-2rem)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden rounded-2xl border-border bg-surface p-4 md:p-6",
               activePanel === "messages" ? "max-w-3xl" : "max-w-md",
             )}
           >
@@ -1178,149 +1570,211 @@ function Lobby() {
               </DialogDescription>
             </DialogHeader>
 
-            {activePanel === "messages" && (
-              <div className="grid min-h-[26rem] gap-3 md:grid-cols-[0.86fr_1.14fr]">
-                <div className="space-y-2 overflow-y-auto pr-1 md:max-h-[28rem]">
-                  {socialLoading ? (
-                    <div className="flex h-full min-h-48 items-center justify-center">
-                      <Loader2 className="size-6 animate-spin text-primary" />
-                    </div>
-                  ) : socialConnections.length === 0 ? (
-                    <EmptySocialCard
-                      icon={UserPlus}
-                      title="No friends yet"
-                      body="Add someone during a call. Once both people confirm, messages open here."
-                      action={
-                        <Button
-                          className="h-10 rounded-xl"
-                          onClick={() => {
-                            setActivePanel(null);
-                            if (status === "idle") startMutation.mutate();
-                          }}
-                          disabled={matchingBusy || status !== "idle"}
-                        >
-                          <Video className="size-4" />
-                          Start matching
-                        </Button>
-                      }
-                    />
-                  ) : (
-                    socialConnections.map((connection) => (
-                      <ConnectionListButton
-                        key={connection.id}
-                        connection={connection}
-                        selected={activeConversation?.id === connection.id}
-                        onClick={() => setActiveConversationId(connection.id)}
+            <div className="min-h-0 overflow-y-auto pr-1">
+              {activePanel === "messages" && (
+                <div className="grid min-h-[26rem] gap-3 md:grid-cols-[0.86fr_1.14fr]">
+                  <div className="space-y-2 overflow-y-auto pr-1 md:max-h-[28rem]">
+                    {socialLoading ? (
+                      <div className="flex h-full min-h-48 items-center justify-center">
+                        <Loader2 className="size-6 animate-spin text-primary" />
+                      </div>
+                    ) : socialConnections.length === 0 ? (
+                      <EmptySocialCard
+                        icon={UserPlus}
+                        title="No friends yet"
+                        body="Add someone during a call. Once both people confirm, messages open here."
+                        action={
+                          <Button
+                            className="h-10 rounded-xl"
+                            onClick={() => {
+                              setActivePanel(null);
+                              if (status === "idle") startMutation.mutate();
+                            }}
+                            disabled={matchingBusy || status !== "idle"}
+                          >
+                            <Video className="size-4" />
+                            Start matching
+                          </Button>
+                        }
                       />
-                    ))
-                  )}
-                </div>
-
-                <div className="flex min-h-[22rem] flex-col overflow-hidden rounded-xl border border-border bg-background">
-                  {activeConversation ? (
-                    <>
-                      <div className="flex items-center gap-3 border-b border-border bg-muted/30 p-3">
-                        <SocialProfileAvatar
-                          profile={activeConversation.otherUser}
-                          className="size-10"
+                    ) : (
+                      socialConnections.map((connection) => (
+                        <ConnectionListButton
+                          key={connection.id}
+                          connection={connection}
+                          selected={activeConversation?.id === connection.id}
+                          onClick={() => setActiveConversationId(connection.id)}
                         />
-                        <div className="min-w-0">
-                          <p className="truncate font-semibold text-foreground">
-                            {getProfileDisplayName(
-                              activeConversation.otherUser,
-                            )}
-                          </p>
-                          <p className="text-xs text-success">
-                            Connected friend
-                          </p>
+                      ))
+                    )}
+                  </div>
+
+                  <div className="flex min-h-[22rem] flex-col overflow-hidden rounded-xl border border-border bg-background">
+                    {activeConversation ? (
+                      <>
+                        <div className="flex items-center gap-3 border-b border-border bg-muted/30 p-3">
+                          <SocialProfileAvatar
+                            profile={activeConversation.otherUser}
+                            className="size-10"
+                          />
+                          <div className="min-w-0">
+                            <p className="truncate font-semibold text-foreground">
+                              {getProfileDisplayName(
+                                activeConversation.otherUser,
+                              )}
+                            </p>
+                            <p className="text-xs text-success">
+                              Connected friend
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                      <div className="flex flex-1 flex-col gap-2 overflow-y-auto p-3">
-                        {conversationMessages.length === 0 ? (
-                          <p className="m-auto max-w-xs text-center text-sm text-muted-foreground">
-                            No messages yet. Say hi now that you both confirmed.
-                          </p>
-                        ) : (
-                          conversationMessages.map((message) => {
-                            const isMe = message.sender_id === profile?.id;
-                            return (
-                              <div
-                                key={message.id}
-                                className={cn(
-                                  "max-w-[85%] rounded-2xl px-3 py-2 text-sm",
-                                  isMe
-                                    ? "self-end rounded-br-sm bg-primary text-primary-foreground"
-                                    : "self-start rounded-bl-sm bg-secondary text-secondary-foreground",
-                                )}
-                              >
-                                {message.body}
-                              </div>
-                            );
-                          })
-                        )}
-                      </div>
-                      <form
-                        className="flex gap-2 border-t border-border bg-muted/20 p-2"
-                        onSubmit={(event) => {
-                          event.preventDefault();
-                          const body = directMessageInput.trim();
-                          if (!body || !activeConversation) return;
-                          sendConnectionMessageMutation.mutate({
-                            connectionId: activeConversation.id,
-                            body,
-                          });
-                        }}
-                      >
-                        <input
-                          type="text"
-                          className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
-                          placeholder="Message your friend..."
-                          value={directMessageInput}
-                          onChange={(event) =>
-                            setDirectMessageInput(event.target.value)
-                          }
-                        />
-                        <Button
-                          type="submit"
-                          size="icon"
-                          className="size-10 shrink-0 rounded-xl"
-                          disabled={
-                            sendConnectionMessageMutation.isPending ||
-                            !directMessageInput.trim()
-                          }
+                        <div
+                          ref={conversationScrollRef}
+                          className="flex flex-1 flex-col gap-2 overflow-y-auto p-3"
                         >
-                          {sendConnectionMessageMutation.isPending ? (
-                            <Loader2 className="size-4 animate-spin" />
+                          {conversationMessages.length === 0 ? (
+                            <p className="m-auto max-w-xs text-center text-sm text-muted-foreground">
+                              No messages yet. Say hi now that you both
+                              confirmed.
+                            </p>
                           ) : (
-                            <SendHorizontal className="size-4" />
+                            conversationMessages.map((message) => {
+                              const isMe = message.sender_id === profile?.id;
+                              return (
+                                <div
+                                  key={message.id}
+                                  className={cn(
+                                    "max-w-[85%] rounded-2xl px-3 py-2 text-sm",
+                                    isMe
+                                      ? "self-end rounded-br-sm bg-primary text-primary-foreground"
+                                      : "self-start rounded-bl-sm bg-secondary text-secondary-foreground",
+                                  )}
+                                >
+                                  {message.body}
+                                </div>
+                              );
+                            })
                           )}
-                        </Button>
-                      </form>
-                    </>
-                  ) : (
-                    <EmptySocialCard
-                      icon={MessageSquare}
-                      title="Choose a friend"
-                      body="Confirmed friends appear here after a mutual request."
-                    />
-                  )}
+                        </div>
+                        <form
+                          className="flex gap-2 border-t border-border bg-muted/20 p-2"
+                          onSubmit={(event) => {
+                            event.preventDefault();
+                            const body = directMessageInput.trim();
+                            if (!body || !activeConversation) return;
+                            sendConnectionMessageMutation.mutate({
+                              connectionId: activeConversation.id,
+                              body,
+                            });
+                          }}
+                        >
+                          <input
+                            type="text"
+                            className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
+                            placeholder="Message your friend..."
+                            value={directMessageInput}
+                            onChange={(event) =>
+                              setDirectMessageInput(event.target.value)
+                            }
+                          />
+                          <Button
+                            type="submit"
+                            size="icon"
+                            className="size-10 shrink-0 rounded-xl"
+                            disabled={
+                              sendConnectionMessageMutation.isPending ||
+                              !directMessageInput.trim()
+                            }
+                          >
+                            {sendConnectionMessageMutation.isPending ? (
+                              <Loader2 className="size-4 animate-spin" />
+                            ) : (
+                              <SendHorizontal className="size-4" />
+                            )}
+                          </Button>
+                        </form>
+                      </>
+                    ) : (
+                      <EmptySocialCard
+                        icon={MessageSquare}
+                        title="Choose a friend"
+                        body="Confirmed friends appear here after a mutual request."
+                      />
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              )}
 
-            {activePanel === "alerts" && (
-              <div className="space-y-3">
-                {incomingRequests.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Friend requests
-                    </p>
-                    {incomingRequests.map((request) => (
-                      <div
-                        key={request.id}
-                        className="rounded-xl border border-primary/30 bg-primary/10 p-3"
-                      >
-                        <div className="flex items-center gap-3">
+              {activePanel === "alerts" && (
+                <div className="space-y-3">
+                  {incomingRequests.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Friend requests
+                      </p>
+                      {incomingRequests.map((request) => (
+                        <div
+                          key={request.id}
+                          className="rounded-xl border border-primary/30 bg-primary/10 p-3"
+                        >
+                          <div className="flex items-center gap-3">
+                            <SocialProfileAvatar
+                              profile={request.otherUser}
+                              className="size-10"
+                            />
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-medium text-foreground">
+                                {getProfileDisplayName(request.otherUser)}
+                              </p>
+                              <p className="text-sm text-muted-foreground">
+                                Wants to add you from a call.
+                              </p>
+                            </div>
+                          </div>
+                          <div className="mt-3 flex gap-2">
+                            <Button
+                              className="h-9 flex-1 rounded-lg"
+                              disabled={respondConnectionMutation.isPending}
+                              onClick={() =>
+                                respondConnectionMutation.mutate({
+                                  connectionId: request.id,
+                                  action: "accept",
+                                })
+                              }
+                            >
+                              <UserCheck className="size-4" />
+                              Confirm
+                            </Button>
+                            <Button
+                              variant="secondary"
+                              className="h-9 flex-1 rounded-lg"
+                              disabled={respondConnectionMutation.isPending}
+                              onClick={() =>
+                                respondConnectionMutation.mutate({
+                                  connectionId: request.id,
+                                  action: "decline",
+                                })
+                              }
+                            >
+                              <X className="size-4" />
+                              Decline
+                            </Button>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+
+                  {outgoingRequests.length > 0 && (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Waiting
+                      </p>
+                      {outgoingRequests.map((request) => (
+                        <div
+                          key={request.id}
+                          className="flex items-center gap-3 rounded-xl border border-border bg-background p-3"
+                        >
                           <SocialProfileAvatar
                             profile={request.otherUser}
                             className="size-10"
@@ -1330,210 +1784,159 @@ function Lobby() {
                               {getProfileDisplayName(request.otherUser)}
                             </p>
                             <p className="text-sm text-muted-foreground">
-                              Wants to add you from a call.
+                              Request sent. Waiting for confirmation.
                             </p>
                           </div>
                         </div>
-                        <div className="mt-3 flex gap-2">
-                          <Button
-                            className="h-9 flex-1 rounded-lg"
-                            disabled={respondConnectionMutation.isPending}
-                            onClick={() =>
-                              respondConnectionMutation.mutate({
-                                connectionId: request.id,
-                                action: "accept",
-                              })
-                            }
-                          >
-                            <UserCheck className="size-4" />
-                            Confirm
-                          </Button>
-                          <Button
-                            variant="secondary"
-                            className="h-9 flex-1 rounded-lg"
-                            disabled={respondConnectionMutation.isPending}
-                            onClick={() =>
-                              respondConnectionMutation.mutate({
-                                connectionId: request.id,
-                                action: "decline",
-                              })
-                            }
-                          >
-                            <X className="size-4" />
-                            Decline
-                          </Button>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {outgoingRequests.length > 0 && (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Waiting
-                    </p>
-                    {outgoingRequests.map((request) => (
-                      <div
-                        key={request.id}
-                        className="flex items-center gap-3 rounded-xl border border-border bg-background p-3"
-                      >
-                        <SocialProfileAvatar
-                          profile={request.otherUser}
-                          className="size-10"
-                        />
-                        <div className="min-w-0 flex-1">
-                          <p className="truncate font-medium text-foreground">
-                            {getProfileDisplayName(request.otherUser)}
-                          </p>
-                          <p className="text-sm text-muted-foreground">
-                            Request sent. Waiting for confirmation.
-                          </p>
-                        </div>
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                <div className="flex gap-3 rounded-xl border border-success/30 bg-success/10 p-4">
-                  <ShieldCheck className="mt-0.5 size-5 shrink-0 text-success" />
-                  <div>
-                    <p className="font-medium text-foreground">
-                      Lume Shield active
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      Report and block controls are ready in every call.
-                    </p>
-                  </div>
-                </div>
-                <div className="flex gap-3 rounded-xl border border-border bg-background p-4">
-                  <Radio className="mt-0.5 size-5 shrink-0 text-primary" />
-                  <div>
-                    <p className="font-medium text-foreground">
-                      {formatCount(onlineCount)} online now
-                    </p>
-                    <p className="text-sm text-muted-foreground">
-                      {formatCount(searchingCount)} looking for a match.
-                    </p>
-                  </div>
-                </div>
-                {socialNotifications.length > 0 ? (
-                  <div className="space-y-2">
-                    <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
-                      Recent
-                    </p>
-                    {socialNotifications.map((notification) => (
-                      <NotificationCard
-                        key={notification.id}
-                        notification={notification}
-                        onOpenConnection={(connectionId) => {
-                          const connection = socialConnections.find(
-                            (item) => item.id === connectionId,
-                          );
-                          if (!connection) return;
-                          setActiveConversationId(connection.id);
-                          setActivePanel("messages");
-                        }}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <EmptySocialCard
-                    icon={Bell}
-                    title="No alerts"
-                    body="Friend requests, accepted requests and new messages appear here."
-                  />
-                )}
-              </div>
-            )}
-
-            {activePanel === "settings" && (
-              <div className="space-y-4">
-                <div className="flex items-center gap-3 rounded-xl border border-border bg-background p-3">
-                  <Avatar className="size-12 border border-border">
-                    {avatarSrc && (
-                      <AvatarImage
-                        src={avatarSrc}
-                        alt={`${displayName} profile`}
-                        className="object-cover"
-                      />
-                    )}
-                    <AvatarFallback className="bg-primary/15 text-sm font-bold text-primary">
-                      {avatarInitials}
-                    </AvatarFallback>
-                  </Avatar>
-                  <div className="min-w-0">
-                    <p className="truncate font-semibold text-foreground">
-                      {displayName}
-                    </p>
-                    <p className="truncate text-sm text-muted-foreground">
-                      {profile?.username
-                        ? `@${profile.username}`
-                        : "Lume member"}
-                    </p>
-                  </div>
-                </div>
-
-                <div className="grid gap-3">
-                  <SettingSwitch
-                    icon={<EyeOff className="size-4 text-primary" />}
-                    label="Incognito mode"
-                    checked={incognitoMode}
-                    onCheckedChange={setIncognitoMode}
-                  />
-                  <SettingSwitch
-                    icon={<Check className="size-4 text-primary" />}
-                    label="High trust matching"
-                    checked={highTrustMatching}
-                    onCheckedChange={setHighTrustMatching}
-                  />
-                  <SettingSwitch
-                    icon={<Languages className="size-4 text-primary" />}
-                    label="Auto translation"
-                    checked={autoTranslate}
-                    onCheckedChange={setAutoTranslate}
-                  />
-                  <SettingSwitch
-                    icon={<MessageCircle className="size-4 text-primary" />}
-                    label="Live captions"
-                    checked={liveCaptions}
-                    onCheckedChange={setLiveCaptions}
-                  />
-                </div>
-
-                <div className="grid gap-3 rounded-xl border border-border bg-background p-4">
-                  <Label htmlFor="settings-language">Preferred language</Label>
-                  <Select
-                    value={selectedLanguage}
-                    onValueChange={setSelectedLanguage}
-                    disabled={preferencesLocked}
-                  >
-                    <SelectTrigger
-                      id="settings-language"
-                      className="h-11 rounded-xl"
-                    >
-                      <SelectValue />
-                    </SelectTrigger>
-                    <SelectContent>
-                      {LANGUAGE_OPTIONS.map((language) => (
-                        <SelectItem key={language.value} value={language.value}>
-                          {language.label}
-                        </SelectItem>
                       ))}
-                    </SelectContent>
-                  </Select>
-                </div>
+                    </div>
+                  )}
 
-                <Button
-                  variant="secondary"
-                  className="h-11 w-full rounded-xl"
-                  onClick={signOut}
-                >
-                  <LogOut className="size-4" />
-                  Sign out
-                </Button>
-              </div>
-            )}
+                  <div className="flex gap-3 rounded-xl border border-success/30 bg-success/10 p-4">
+                    <ShieldCheck className="mt-0.5 size-5 shrink-0 text-success" />
+                    <div>
+                      <p className="font-medium text-foreground">
+                        Lume Shield active
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Report and block controls are ready in every call.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="flex gap-3 rounded-xl border border-border bg-background p-4">
+                    <Radio className="mt-0.5 size-5 shrink-0 text-primary" />
+                    <div>
+                      <p className="font-medium text-foreground">
+                        {formatCount(onlineCount)} online now
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        {formatCount(searchingCount)} looking for a match.
+                      </p>
+                    </div>
+                  </div>
+                  {socialNotifications.length > 0 ? (
+                    <div className="space-y-2">
+                      <p className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+                        Recent
+                      </p>
+                      {socialNotifications.map((notification) => (
+                        <NotificationCard
+                          key={notification.id}
+                          notification={notification}
+                          onOpenConnection={(connectionId) => {
+                            const connection = socialConnections.find(
+                              (item) => item.id === connectionId,
+                            );
+                            if (!connection) return;
+                            setActiveConversationId(connection.id);
+                            setActivePanel("messages");
+                          }}
+                        />
+                      ))}
+                    </div>
+                  ) : (
+                    <EmptySocialCard
+                      icon={Bell}
+                      title="No alerts"
+                      body="Friend requests, accepted requests and new messages appear here."
+                    />
+                  )}
+                </div>
+              )}
+
+              {activePanel === "settings" && (
+                <div className="space-y-3 md:space-y-4">
+                  <div className="flex items-center gap-3 rounded-xl border border-border bg-background p-3">
+                    <Avatar className="size-12 border border-border">
+                      {avatarSrc && (
+                        <AvatarImage
+                          src={avatarSrc}
+                          alt={`${displayName} profile`}
+                          className="object-cover"
+                        />
+                      )}
+                      <AvatarFallback className="bg-primary/15 text-sm font-bold text-primary">
+                        {avatarInitials}
+                      </AvatarFallback>
+                    </Avatar>
+                    <div className="min-w-0">
+                      <p className="truncate font-semibold text-foreground">
+                        {displayName}
+                      </p>
+                      <p className="truncate text-sm text-muted-foreground">
+                        {profile?.username
+                          ? `@${profile.username}`
+                          : "Lume member"}
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-2.5 md:gap-3">
+                    <SettingSwitch
+                      icon={<EyeOff className="size-4 text-primary" />}
+                      label="Incognito mode"
+                      checked={incognitoMode}
+                      onCheckedChange={setIncognitoMode}
+                    />
+                    <SettingSwitch
+                      icon={<Check className="size-4 text-primary" />}
+                      label="High trust matching"
+                      checked={highTrustMatching}
+                      onCheckedChange={setHighTrustMatching}
+                    />
+                    <SettingSwitch
+                      icon={<Languages className="size-4 text-primary" />}
+                      label="Auto translation"
+                      checked={autoTranslate}
+                      onCheckedChange={setAutoTranslate}
+                    />
+                    <SettingSwitch
+                      icon={<MessageCircle className="size-4 text-primary" />}
+                      label="Live captions"
+                      checked={liveCaptions}
+                      onCheckedChange={setLiveCaptions}
+                    />
+                  </div>
+
+                  <div className="grid gap-3 rounded-xl border border-border bg-background p-3 md:p-4">
+                    <Label htmlFor="settings-language">
+                      Preferred language
+                    </Label>
+                    <Select
+                      value={selectedLanguage}
+                      onValueChange={setSelectedLanguage}
+                      disabled={preferencesLocked}
+                    >
+                      <SelectTrigger
+                        id="settings-language"
+                        className="h-11 rounded-xl"
+                      >
+                        <SelectValue />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {LANGUAGE_OPTIONS.map((language) => (
+                          <SelectItem
+                            key={language.value}
+                            value={language.value}
+                          >
+                            {language.label}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+
+                  <Button
+                    variant="secondary"
+                    className="h-11 w-full rounded-xl"
+                    onClick={signOut}
+                  >
+                    <LogOut className="size-4" />
+                    Sign out
+                  </Button>
+                </div>
+              )}
+            </div>
           </DialogContent>
         </Dialog>
       </div>

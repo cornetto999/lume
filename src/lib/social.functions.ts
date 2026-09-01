@@ -120,6 +120,24 @@ function getProfileName(profile: PublicProfile | null, fallback = "Someone") {
   return profile?.display_name || profile?.username || fallback;
 }
 
+function getMessageTime(message: DirectMessageRow | null | undefined) {
+  return message ? Date.parse(message.created_at) || 0 : 0;
+}
+
+function getConnectionActivityTime(connection: SocialConnection) {
+  return (
+    getMessageTime(connection.lastMessage) ||
+    Date.parse(connection.responded_at ?? connection.requested_at) ||
+    0
+  );
+}
+
+function sortConnectionSummaries(connections: SocialConnection[]) {
+  return [...connections].sort(
+    (a, b) => getConnectionActivityTime(b) - getConnectionActivityTime(a),
+  );
+}
+
 async function loadProfileMap(
   supabaseAdmin: SupabaseAdminClient,
   userIds: string[],
@@ -406,11 +424,11 @@ export const getSocialSummary = createServerFn({ method: "GET" })
     const notifications = (notificationsResult.data ?? []) as NotificationRow[];
 
     return {
-      connections: summaries.filter(
-        (connection) => connection.status === "accepted",
+      connections: sortConnectionSummaries(
+        summaries.filter((connection) => connection.status === "accepted"),
       ),
-      pendingRequests: summaries.filter(
-        (connection) => connection.status === "pending",
+      pendingRequests: sortConnectionSummaries(
+        summaries.filter((connection) => connection.status === "pending"),
       ),
       messages: messages as DirectMessage[],
       notifications,

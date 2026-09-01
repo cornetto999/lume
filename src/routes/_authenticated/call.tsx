@@ -992,7 +992,10 @@ function CallRoom() {
             )}
             <div
               aria-hidden="true"
-              className="pointer-events-none absolute bottom-4 left-1/2 -translate-x-1/2 select-none text-sm font-semibold text-muted-foreground/30"
+              className={cn(
+                "pointer-events-none absolute bottom-4 select-none rounded-full bg-black/35 px-3 py-1 text-xs font-semibold text-white/75 shadow-[0_8px_24px_rgba(0,0,0,0.28)] ring-1 ring-white/15 backdrop-blur-sm",
+                hasRemoteVideo ? "right-4" : "left-1/2 -translate-x-1/2",
+              )}
             >
               lume
             </div>
