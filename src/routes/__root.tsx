@@ -40,7 +40,8 @@ function NotFoundComponent() {
 
 function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
   console.error(error);
-  const router = useRouter();
+  const showErrorDetails = import.meta.env.DEV;
+
   useEffect(() => {
     reportLovableError(error, { boundary: "tanstack_root_error_component" });
   }, [error]);
@@ -55,21 +56,21 @@ function ErrorComponent({ error, reset }: { error: Error; reset: () => void }) {
           Something went wrong on our end. You can try refreshing or head back
           home.
         </p>
-        <div className="mt-4 p-4 bg-muted rounded-md text-left overflow-auto max-h-64 border">
-          <p className="text-xs font-mono text-red-500 whitespace-pre-wrap font-bold">
-            {error.message || String(error)}
-          </p>
-          {error.stack && (
-            <p className="text-xs font-mono text-muted-foreground whitespace-pre-wrap mt-2">
-              {error.stack}
+        {showErrorDetails && (
+          <div className="mt-4 max-h-64 overflow-auto rounded-md border bg-muted p-4 text-left">
+            <p className="font-mono text-xs font-bold whitespace-pre-wrap text-red-500">
+              {error.message || String(error)}
             </p>
-          )}
-        </div>
+            {error.stack && (
+              <p className="mt-2 font-mono text-xs whitespace-pre-wrap text-muted-foreground">
+                {error.stack}
+              </p>
+            )}
+          </div>
+        )}
         <div className="mt-6 flex flex-wrap justify-center gap-2">
           <button
-            onClick={() => {
-              window.location.reload();
-            }}
+            onClick={reset}
             className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
           >
             Try again

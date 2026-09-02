@@ -21,7 +21,8 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
     // Only convert to HTML for actual browser page/document requests.
     const { getRequest } = await import("@tanstack/react-start/server");
     const request = getRequest();
-    const acceptsHtml = request?.headers.get("accept")?.includes("text/html") ?? true;
+    const acceptsHtml =
+      request?.headers.get("accept")?.includes("text/html") ?? true;
     if (!acceptsHtml) {
       throw error;
     }

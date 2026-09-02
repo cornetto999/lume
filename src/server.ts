@@ -39,14 +39,15 @@ async function normalizeCatastrophicSsrResponse(
     consumeLastCapturedError() ?? new Error(`h3 swallowed SSR error: ${body}`),
   );
 
-  const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? true;
+  const acceptsHtml =
+    request.headers.get("accept")?.includes("text/html") ?? true;
   if (!acceptsHtml) {
     return new Response(
       JSON.stringify({ error: { message: "Internal Server Error" } }),
       {
         status: 500,
         headers: { "content-type": "application/json" },
-      }
+      },
     );
   }
 
@@ -76,14 +77,15 @@ export default {
       return await normalizeCatastrophicSsrResponse(request, response);
     } catch (error) {
       console.error(error);
-      const acceptsHtml = request.headers.get("accept")?.includes("text/html") ?? true;
+      const acceptsHtml =
+        request.headers.get("accept")?.includes("text/html") ?? true;
       if (!acceptsHtml) {
         return new Response(
           JSON.stringify({ error: { message: "Internal Server Error" } }),
           {
             status: 500,
             headers: { "content-type": "application/json" },
-          }
+          },
         );
       }
       return new Response(renderErrorPage(), {

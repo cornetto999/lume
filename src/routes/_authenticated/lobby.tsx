@@ -40,7 +40,6 @@ import {
   Trophy,
   UserCheck,
   UserPlus,
-  Users,
   Utensils,
   Video,
   X,
@@ -64,7 +63,6 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
-import { Switch } from "@/components/ui/switch";
 import { useCamera } from "@/contexts/useCamera";
 import {
   cancelMatching,
@@ -125,6 +123,10 @@ const SOCIAL_MESSAGE_CACHE_LIMIT = 120;
 const OPTIMISTIC_MESSAGE_PREFIX = "optimistic-message";
 const DEFAULT_VISIBLE_VIBE_COUNT = 2;
 const DEFAULT_VISIBLE_TOPIC_COUNT = 6;
+const LOBBY_SNAPSHOT_REFETCH_INTERVAL_MS = 45_000;
+const MATCH_SEARCH_REFETCH_INTERVAL_MS = 3_000;
+const SOCIAL_SUMMARY_ACTIVE_REFETCH_INTERVAL_MS = 20_000;
+const SOCIAL_SUMMARY_IDLE_REFETCH_INTERVAL_MS = 60_000;
 
 const VIBE_CARDS: VibeCard[] = [
   {
@@ -527,10 +529,6 @@ function Lobby() {
   const queryClient = useQueryClient();
   const { localStream, startCamera, stopCamera } = useCamera();
   const [activePanel, setActivePanel] = useState<LobbyPanel | null>(null);
-  const [incognitoMode, setIncognitoMode] = useState(false);
-  const [liveCaptions, setLiveCaptions] = useState(false);
-  const [autoTranslate, setAutoTranslate] = useState(false);
-  const [highTrustMatching, setHighTrustMatching] = useState(true);
   const [selectedVibe, setSelectedVibe] = useState<VibeOption>(
     DEFAULT_MATCH_PREFERENCES.vibe,
   );
@@ -564,11 +562,12 @@ function Lobby() {
     retry: false,
   });
 
-  const { data: snapshot } = useQuery({
+  const { data: snapshot, isLoading: snapshotLoading } = useQuery({
     queryKey: ["lobby-snapshot"],
     queryFn: () => getLobbySnapshot(),
     enabled: !!profile?.profile_completed,
-    refetchInterval: 30_000,
+    placeholderData: (previous) => previous,
+    refetchInterval: LOBBY_SNAPSHOT_REFETCH_INTERVAL_MS,
   });
 
   const {
@@ -582,7 +581,9 @@ function Lobby() {
     retry: 1,
     throwOnError: false,
     refetchInterval: (query) =>
-      query.state.data?.state === "searching" ? 1_500 : false,
+      query.state.data?.state === "searching"
+        ? MATCH_SEARCH_REFETCH_INTERVAL_MS
+        : false,
   });
   const status = matchState?.state ?? "idle";
 
@@ -590,9 +591,13 @@ function Lobby() {
     queryKey: SOCIAL_SUMMARY_QUERY_KEY,
     queryFn: () => getSocialSummary(),
     enabled: !!profile?.profile_completed,
+    placeholderData: (previous) => previous,
     retry: 1,
     throwOnError: false,
-    refetchInterval: 15_000,
+    refetchInterval:
+      activePanel === "messages" || activePanel === "alerts"
+        ? SOCIAL_SUMMARY_ACTIVE_REFETCH_INTERVAL_MS
+        : SOCIAL_SUMMARY_IDLE_REFETCH_INTERVAL_MS,
   });
 
   const respondConnectionMutation = useMutation({
@@ -1119,6 +1124,7 @@ function Lobby() {
   }
 
   const displayName = profile?.display_name || profile?.username || "Friend";
+  const firstName = getFirstName(displayName);
   const avatarSrc = profile?.avatar_url || undefined;
   const avatarInitials = getUserInitials(displayName);
   const onlineCount = snapshot?.onlineCount ?? 0;
@@ -1139,7 +1145,17 @@ function Lobby() {
       ? matchState.session.room_name.replace(/^lume-/, "").slice(0, 8)
       : null;
   const preferencesLocked = status !== "idle" || matchingBusy;
+  const selectedTopicCount = focusTopics.length;
   const countryLabel = formatCountryLabel(profile?.country);
+  const languageLabel = getLanguageLabel(selectedLanguage);
+  const topicSummary = formatTopicSelection(selectedTopicCount);
+  const countrySummary = countryMode === "global" ? "Global" : countryLabel;
+  const preferenceSummary = [
+    selectedVibe,
+    languageLabel,
+    countrySummary,
+    topicSummary,
+  ].join(" / ");
   const activePanelTitle =
     activePanel === "messages"
       ? "Messages"
@@ -1152,7 +1168,6 @@ function Lobby() {
       : activePanel === "alerts"
         ? Bell
         : Settings;
-  const selectedTopicCount = focusTopics.length;
   const trendingVibes =
     snapshot?.trendingVibes ??
     VIBE_OPTIONS.map((label) => ({ label, count: 0 }));
@@ -1210,6 +1225,40 @@ function Lobby() {
       : status === "matched"
         ? "End match"
         : "Start matching";
+  const primaryActionBusyLabel = startMutation.isPending
+    ? "Opening camera"
+    : cancelMutation.isPending
+      ? "Cancelling search"
+      : endMutation.isPending
+        ? "Ending match"
+        : "Syncing";
+  const primaryActionText = matchingBusy
+    ? primaryActionBusyLabel
+    : primaryActionLabel;
+  const MatchReadinessIcon = matchingBusy
+    ? Loader2
+    : status === "matched"
+      ? CheckCircle2
+      : status === "searching"
+        ? Radio
+        : Video;
+  const matchReadinessIconClassName = cn(
+    "text-primary",
+    matchingBusy && "animate-spin",
+    status === "matched" && !matchingBusy && "text-success",
+  );
+  const matchReadinessTitle =
+    status === "matched"
+      ? "Room ready"
+      : status === "searching"
+        ? "Searching with your picks"
+        : matchingBusy
+          ? primaryActionBusyLabel
+          : "Ready when you are";
+  const matchReadinessDetail =
+    status === "matched" && partnerName && roomCode
+      ? `Matched with ${partnerName}. Room ${roomCode}.`
+      : preferenceSummary;
 
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
@@ -1271,10 +1320,10 @@ function Lobby() {
           <div className="relative">
             <Sparkles className="absolute -left-2 top-2 size-4 rotate-12 text-primary" />
             <h1 className="max-w-lg text-3xl font-black leading-[0.98] sm:text-4xl lg:text-5xl">
-              Ready to meet <span className="block text-primary">someone?</span>
+              Ready, <span className="block text-primary">{firstName}?</span>
             </h1>
             <p className="mt-3 text-sm text-muted-foreground sm:text-base">
-              Good people. Real conversations.
+              Set the mood for your next live match.
             </p>
           </div>
 
@@ -1292,24 +1341,30 @@ function Lobby() {
           <StatMetric
             icon={Radio}
             iconClassName="border-success/30 bg-success/10 text-success"
-            value={formatCount(onlineCount)}
+            value={
+              snapshotLoading && !snapshot ? "..." : formatCount(onlineCount)
+            }
             label="online now"
             labelClassName="text-success"
           />
           <StatMetric
             icon={SlidersHorizontal}
             iconClassName="border-primary/30 bg-primary/10 text-primary"
-            value={formatCount(searchingCount)}
+            value={
+              snapshotLoading && !snapshot ? "..." : formatCount(searchingCount)
+            }
             label="matching now"
             labelClassName="text-primary"
             divider
           />
           <StatMetric
-            icon={Users}
-            iconClassName="border-violet-400/30 bg-violet-400/10 text-violet-300"
-            value="58,931"
-            label="joined Lume today"
-            labelClassName="text-violet-300"
+            icon={MessageCircle}
+            iconClassName="border-sky-400/30 bg-sky-400/10 text-sky-300"
+            value={
+              selectedTopicCount ? formatCount(selectedTopicCount) : "Open"
+            }
+            label="topic focus"
+            labelClassName="text-sky-300"
             divider
           />
         </section>
@@ -1324,9 +1379,12 @@ function Lobby() {
               <button
                 key={trend.label}
                 type="button"
-                className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-secondary/70 px-3 text-xs text-foreground transition hover:border-primary/60 hover:bg-primary/10"
+                aria-label={`${trend.label} vibe, ${formatCount(
+                  trend.count,
+                )} active`}
+                disabled={preferencesLocked}
+                className="inline-flex h-8 items-center gap-2 rounded-full border border-border bg-secondary/70 px-3 text-xs text-foreground transition hover:border-primary/60 hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-60"
                 onClick={() => {
-                  if (preferencesLocked) return;
                   const matching = VIBE_CARDS.find(
                     (card) =>
                       card.label === trend.label || card.value === trend.label,
@@ -1369,7 +1427,9 @@ function Lobby() {
               icon={Heart}
               iconClassName="text-rose-300"
               title="I'm here to"
-              subtitle="Choose your vibe"
+              subtitle={
+                preferencesLocked ? "Locked while matching" : "Choose your vibe"
+              }
             />
             <SectionToggleButton
               expanded={showAllVibes}
@@ -1403,9 +1463,11 @@ function Lobby() {
               icon={MessageCircle}
               iconClassName="text-pink-300"
               title="I like talking about"
-              subtitle={`Pick topics you enjoy (choose up to 5)${
-                selectedTopicCount ? ` | ${selectedTopicCount} selected` : ""
-              }`}
+              subtitle={
+                preferencesLocked
+                  ? `${topicSummary} locked while matching`
+                  : `Pick up to 5 topics | ${topicSummary}`
+              }
             />
             <SectionToggleButton
               expanded={showAllTopics}
@@ -1416,6 +1478,9 @@ function Lobby() {
           <div className="mt-4 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
             {visibleTopicCards.map((card) => {
               const selected = focusTopics.includes(card.topic);
+              const topicDisabled =
+                card.action !== "settings" &&
+                (preferencesLocked || (!selected && selectedTopicCount >= 5));
               const handleClick = () => {
                 if (card.action === "settings") {
                   setActivePanel("settings");
@@ -1431,7 +1496,7 @@ function Lobby() {
                   iconClassName={card.iconClassName}
                   label={card.label}
                   selected={selected}
-                  disabled={preferencesLocked && card.action !== "settings"}
+                  disabled={topicDisabled}
                   onClick={handleClick}
                 />
               );
@@ -1445,7 +1510,9 @@ function Lobby() {
               icon={Globe2}
               iconClassName="text-violet-300"
               title="Language"
-              subtitle="Choose the language you prefer"
+              subtitle={
+                preferencesLocked ? "Locked while matching" : languageLabel
+              }
             />
             <Select
               value={selectedLanguage}
@@ -1470,7 +1537,9 @@ function Lobby() {
               icon={MapPin}
               iconClassName="text-violet-300"
               title="Country"
-              subtitle="Where do you want to meet people from?"
+              subtitle={
+                preferencesLocked ? "Locked while matching" : countrySummary
+              }
             />
             <div className="mt-3 grid overflow-hidden rounded-xl border border-border bg-secondary/70 p-1 sm:grid-cols-2">
               <SegmentButton
@@ -1509,28 +1578,38 @@ function Lobby() {
           />
         )}
 
-        <Button
-          size="lg"
-          variant={status === "searching" ? "secondary" : "default"}
-          disabled={matchingBusy}
-          className={cn(
-            "ember-lift mt-4 h-11 w-full rounded-full text-sm font-bold sm:h-12 sm:text-base",
-            status !== "searching" &&
-              "bg-primary text-primary-foreground hover:bg-primary/90",
-          )}
-          onClick={onPrimaryMatchAction}
-        >
-          {matchingBusy ? (
-            <Loader2 className="size-5 animate-spin" />
-          ) : status === "searching" ? (
-            <X className="size-5" />
-          ) : status === "matched" ? (
-            <CheckCircle2 className="size-5" />
-          ) : (
-            <Video className="size-5" />
-          )}
-          {primaryActionLabel}
-        </Button>
+        <section className="sticky bottom-3 z-20 mt-4 rounded-2xl border border-border bg-background/90 p-2 shadow-2xl shadow-black/25 backdrop-blur sm:bottom-4 sm:p-3">
+          <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+            <MatchReadinessSummary
+              icon={MatchReadinessIcon}
+              iconClassName={matchReadinessIconClassName}
+              title={matchReadinessTitle}
+              detail={matchReadinessDetail}
+            />
+            <Button
+              size="lg"
+              variant={status === "searching" ? "secondary" : "default"}
+              disabled={matchingBusy}
+              className={cn(
+                "ember-lift h-12 w-full rounded-full px-5 text-sm font-bold sm:w-auto sm:min-w-52 sm:text-base",
+                status !== "searching" &&
+                  "bg-primary text-primary-foreground hover:bg-primary/90",
+              )}
+              onClick={onPrimaryMatchAction}
+            >
+              {matchingBusy ? (
+                <Loader2 className="size-5 animate-spin" />
+              ) : status === "searching" ? (
+                <X className="size-5" />
+              ) : status === "matched" ? (
+                <CheckCircle2 className="size-5" />
+              ) : (
+                <Video className="size-5" />
+              )}
+              {primaryActionText}
+            </Button>
+          </div>
+        </section>
 
         <footer className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-xs text-muted-foreground">
           <ShieldCheck className="size-4" />
@@ -1670,6 +1749,9 @@ function Lobby() {
                         >
                           <input
                             type="text"
+                            aria-label={`Message ${getProfileDisplayName(
+                              activeConversation.otherUser,
+                            )}`}
                             className="min-w-0 flex-1 rounded-xl border border-border bg-background px-3 py-2 text-sm outline-none focus:border-primary"
                             placeholder="Message your friend..."
                             value={directMessageInput}
@@ -1691,6 +1773,7 @@ function Lobby() {
                             ) : (
                               <SendHorizontal className="size-4" />
                             )}
+                            <span className="sr-only">Send message</span>
                           </Button>
                         </form>
                       </>
@@ -1872,29 +1955,25 @@ function Lobby() {
                   </div>
 
                   <div className="grid gap-2.5 md:gap-3">
-                    <SettingSwitch
+                    <SettingStatus
                       icon={<EyeOff className="size-4 text-primary" />}
                       label="Incognito mode"
-                      checked={incognitoMode}
-                      onCheckedChange={setIncognitoMode}
+                      value="Soon"
                     />
-                    <SettingSwitch
+                    <SettingStatus
                       icon={<Check className="size-4 text-primary" />}
                       label="High trust matching"
-                      checked={highTrustMatching}
-                      onCheckedChange={setHighTrustMatching}
+                      value="On"
                     />
-                    <SettingSwitch
+                    <SettingStatus
                       icon={<Languages className="size-4 text-primary" />}
                       label="Auto translation"
-                      checked={autoTranslate}
-                      onCheckedChange={setAutoTranslate}
+                      value="Soon"
                     />
-                    <SettingSwitch
+                    <SettingStatus
                       icon={<MessageCircle className="size-4 text-primary" />}
                       label="Live captions"
-                      checked={liveCaptions}
-                      onCheckedChange={setLiveCaptions}
+                      value="Soon"
                     />
                   </div>
 
@@ -1955,9 +2034,12 @@ function IconHeaderButton({
   badgeCount?: number;
   onClick: () => void;
 }) {
+  const ariaLabel = badgeCount > 0 ? `${label}, ${badgeCount} unread` : label;
+
   return (
     <button
       type="button"
+      aria-label={ariaLabel}
       className="relative flex size-9 items-center justify-center rounded-lg border border-border bg-surface/80 text-foreground shadow-sm backdrop-blur transition hover:border-primary/60 hover:bg-surface-raised focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
       onClick={onClick}
     >
@@ -2110,6 +2192,32 @@ function NotificationCard({
             )}
           </div>
         </div>
+      </div>
+    </div>
+  );
+}
+
+function MatchReadinessSummary({
+  icon: Icon,
+  iconClassName,
+  title,
+  detail,
+}: {
+  icon: LucideIcon;
+  iconClassName: string;
+  title: string;
+  detail: string;
+}) {
+  return (
+    <div className="flex min-w-0 items-center gap-3">
+      <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/15">
+        <Icon className={cn("size-5", iconClassName)} />
+      </div>
+      <div className="min-w-0">
+        <p className="truncate text-sm font-semibold text-foreground">
+          {title}
+        </p>
+        <p className="truncate text-xs text-muted-foreground">{detail}</p>
       </div>
     </div>
   );
@@ -2335,19 +2443,17 @@ function StatusNotice({
   );
 }
 
-function SettingSwitch({
+function SettingStatus({
   icon,
   label,
-  checked,
-  onCheckedChange,
+  value,
 }: {
   icon: ReactNode;
   label: string;
-  checked: boolean;
-  onCheckedChange: (checked: boolean) => void;
+  value: string;
 }) {
   return (
-    <label className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
+    <div className="flex items-center justify-between gap-4 rounded-lg border border-border bg-background p-3">
       <span className="flex min-w-0 items-center gap-3">
         <span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-primary/15">
           {icon}
@@ -2356,13 +2462,32 @@ function SettingSwitch({
           {label}
         </span>
       </span>
-      <Switch checked={checked} onCheckedChange={onCheckedChange} />
-    </label>
+      <span className="rounded-full border border-border bg-secondary px-2.5 py-1 text-xs font-semibold text-muted-foreground">
+        {value}
+      </span>
+    </div>
   );
 }
 
 function formatCount(value: number) {
   return new Intl.NumberFormat("en-US").format(value);
+}
+
+function getFirstName(displayName: string) {
+  return displayName.trim().split(/\s+/)[0] || "Friend";
+}
+
+function getLanguageLabel(value: string) {
+  return (
+    LANGUAGE_OPTIONS.find((language) => language.value === value)?.label ??
+    value
+  );
+}
+
+function formatTopicSelection(count: number) {
+  if (count === 0) return "Open topics";
+  if (count === 1) return "1 topic";
+  return `${count} topics`;
 }
 
 function getNotificationConnectionId(notification: Notification) {

@@ -47,7 +47,7 @@ export const Route = createFileRoute("/_authenticated/onboarding")({
 
 function Onboarding() {
   const navigate = useNavigate();
-      
+
   const { data: profile } = useQuery({
     queryKey: ["my-profile"],
     queryFn: () => getMyProfile(),

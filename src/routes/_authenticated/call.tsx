@@ -100,7 +100,7 @@ type RtcSignalPayload = {
 
 const SIGNAL_EVENT = "webrtc_signal";
 const INTRO_SECONDS = 30;
-const SEARCH_REFETCH_INTERVAL_MS = 500;
+const SEARCH_REFETCH_INTERVAL_MS = 2_000;
 const ICEBREAKER_CARDS = [
   "What's your dream destination?",
   "Coffee or milk tea?",
@@ -1168,16 +1168,18 @@ function CallRoom() {
             }}
           >
             <MessageCircle className="size-5" />
-            <span
-              className={cn(
-                "absolute -right-1 -top-1 flex min-w-5 items-center justify-center rounded-full border-2 border-background px-1 text-[11px] font-bold leading-4",
-                chatUnreadCount > 0
-                  ? "bg-primary text-primary-foreground"
-                  : "bg-muted text-muted-foreground",
-              )}
-            >
-              {chatBadgeCount > 99 ? "99+" : chatBadgeCount}
-            </span>
+            {chatBadgeCount > 0 && (
+              <span
+                className={cn(
+                  "absolute -right-1 -top-1 flex min-w-5 items-center justify-center rounded-full border-2 border-background px-1 text-[11px] font-bold leading-4",
+                  chatUnreadCount > 0
+                    ? "bg-primary text-primary-foreground"
+                    : "bg-muted text-muted-foreground",
+                )}
+              >
+                {chatBadgeCount > 99 ? "99+" : chatBadgeCount}
+              </span>
+            )}
             <span className="sr-only">Live Chat</span>
           </Button>
           {status === "matched" && (
