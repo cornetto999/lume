@@ -11,6 +11,7 @@ import {
   ChevronDown,
   ChevronUp,
   Code2,
+  CreditCard,
   Crown,
   Cpu,
   Dumbbell,
@@ -63,6 +64,7 @@ import {
   SelectTrigger,
   SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { useCamera } from "@/contexts/useCamera";
 import {
   cancelMatching,
@@ -70,6 +72,12 @@ import {
   getMatchmakingState,
   startMatching,
 } from "@/lib/matchmaking.functions";
+import {
+  confirmLumePlusCheckout,
+  createLumePlusCheckoutSession,
+  createLumePlusPortalSession,
+  getLumePlusSubscription,
+} from "@/lib/plus.functions";
 import {
   getLobbySnapshot,
   getMyProfile,
@@ -98,7 +106,7 @@ import {
   type VibeOption,
 } from "@/types/models";
 
-type LobbyPanel = "messages" | "alerts" | "settings";
+type LobbyPanel = "messages" | "alerts" | "settings" | "safety";
 
 type VibeCard = {
   label: string;
@@ -123,10 +131,24 @@ const SOCIAL_MESSAGE_CACHE_LIMIT = 120;
 const OPTIMISTIC_MESSAGE_PREFIX = "optimistic-message";
 const DEFAULT_VISIBLE_VIBE_COUNT = 2;
 const DEFAULT_VISIBLE_TOPIC_COUNT = 6;
+const LUME_PLUS_SUBSCRIPTION_QUERY_KEY = ["lume-plus-subscription"] as const;
 const LOBBY_SNAPSHOT_REFETCH_INTERVAL_MS = 45_000;
 const MATCH_SEARCH_REFETCH_INTERVAL_MS = 3_000;
 const SOCIAL_SUMMARY_ACTIVE_REFETCH_INTERVAL_MS = 20_000;
 const SOCIAL_SUMMARY_IDLE_REFETCH_INTERVAL_MS = 60_000;
+const LUME_PLUS_SETTINGS_STORAGE_KEY = "lume-plus-settings";
+const BASIC_TOPIC_LIMIT = 5;
+const PLUS_TOPIC_LIMIT = 8;
+const PLUS_CANDIDATE_POOL_LIMIT = 48;
+const DEFAULT_LUME_PLUS_SETTINGS = {
+  priorityBoost: true,
+  smartExpansion: true,
+  smartTopics: true,
+  incognitoIdle: false,
+};
+
+type LumePlusSettings = typeof DEFAULT_LUME_PLUS_SETTINGS;
+type LumePlusSettingKey = keyof LumePlusSettings;
 
 const VIBE_CARDS: VibeCard[] = [
   {
@@ -263,6 +285,91 @@ const TRENDING_DOT_CLASSES: Record<string, string> = {
   Tech: "bg-teal-400",
   Friendship: "bg-rose-400",
 };
+
+function readStoredLumePlusSettings(): LumePlusSettings {
+  if (typeof window === "undefined") return DEFAULT_LUME_PLUS_SETTINGS;
+
+  try {
+    const stored = JSON.parse(
+      window.localStorage.getItem(LUME_PLUS_SETTINGS_STORAGE_KEY) ?? "{}",
+    ) as Partial<Record<LumePlusSettingKey, unknown>>;
+
+    return {
+      priorityBoost:
+        typeof stored.priorityBoost === "boolean"
+          ? stored.priorityBoost
+          : DEFAULT_LUME_PLUS_SETTINGS.priorityBoost,
+      smartExpansion:
+        typeof stored.smartExpansion === "boolean"
+          ? stored.smartExpansion
+          : DEFAULT_LUME_PLUS_SETTINGS.smartExpansion,
+      smartTopics:
+        typeof stored.smartTopics === "boolean"
+          ? stored.smartTopics
+          : DEFAULT_LUME_PLUS_SETTINGS.smartTopics,
+      incognitoIdle:
+        typeof stored.incognitoIdle === "boolean"
+          ? stored.incognitoIdle
+          : DEFAULT_LUME_PLUS_SETTINGS.incognitoIdle,
+    };
+  } catch {
+    return DEFAULT_LUME_PLUS_SETTINGS;
+  }
+}
+
+function persistLumePlusSettings(settings: LumePlusSettings) {
+  window.localStorage.setItem(
+    LUME_PLUS_SETTINGS_STORAGE_KEY,
+    JSON.stringify(settings),
+  );
+}
+
+function clearPlusReturnParams() {
+  const url = new URL(window.location.href);
+  url.searchParams.delete("plus");
+  url.searchParams.delete("session_id");
+  window.history.replaceState(
+    null,
+    "",
+    `${url.pathname}${url.search}${url.hash}`,
+  );
+}
+
+function isSelectableTopic(topic: string) {
+  return TOPIC_CARDS.some(
+    (card) => card.action !== "settings" && card.topic === topic,
+  );
+}
+
+function uniqueTopics(values: string[]) {
+  return values.filter(
+    (topic, index, topics) =>
+      isSelectableTopic(topic) && topics.indexOf(topic) === index,
+  );
+}
+
+function buildSmartTopicSelection({
+  currentTopics,
+  profileTopics,
+  trendLabels,
+  selectedVibe,
+  limit,
+}: {
+  currentTopics: string[];
+  profileTopics: string[];
+  trendLabels: string[];
+  selectedVibe: string;
+  limit: number;
+}) {
+  return uniqueTopics([
+    ...currentTopics,
+    ...profileTopics,
+    ...trendLabels,
+    selectedVibe,
+    ...DEFAULT_TOPIC_SELECTION,
+    ...TOPIC_CARDS.map((card) => card.topic),
+  ]).slice(0, limit);
+}
 
 function getUserInitials(name: string) {
   const words = name.trim().split(/\s+/).filter(Boolean);
@@ -541,12 +648,18 @@ function Lobby() {
   const [showAllTrends, setShowAllTrends] = useState(false);
   const [showAllVibes, setShowAllVibes] = useState(false);
   const [showAllTopics, setShowAllTopics] = useState(false);
+  const [plusDialogOpen, setPlusDialogOpen] = useState(false);
+  const [plusSettings, setPlusSettings] = useState(readStoredLumePlusSettings);
   const [activeConversationId, setActiveConversationId] = useState<
     string | null
   >(null);
   const [directMessageInput, setDirectMessageInput] = useState("");
   const activePanelRef = useRef<LobbyPanel | null>(null);
   const activeConversationIdRef = useRef<string | null>(null);
+  const confirmPlusCheckoutStartedRef = useRef(false);
+  const confirmPlusCheckoutRef = useRef<(sessionId: string) => void>(
+    () => undefined,
+  );
   const conversationScrollRef = useRef<HTMLDivElement | null>(null);
   const markConnectionMessagesReadRef = useRef<(connectionId: string) => void>(
     () => undefined,
@@ -598,6 +711,55 @@ function Lobby() {
       activePanel === "messages" || activePanel === "alerts"
         ? SOCIAL_SUMMARY_ACTIVE_REFETCH_INTERVAL_MS
         : SOCIAL_SUMMARY_IDLE_REFETCH_INTERVAL_MS,
+  });
+
+  const { data: plusSubscription, isLoading: plusSubscriptionLoading } =
+    useQuery({
+      queryKey: LUME_PLUS_SUBSCRIPTION_QUERY_KEY,
+      queryFn: () => getLumePlusSubscription(),
+      enabled: !!profile?.profile_completed,
+      placeholderData: (previous) => previous,
+      retry: 1,
+      throwOnError: false,
+    });
+  const plusPaidActive = plusSubscription?.active === true;
+  const plusAccessActive = plusPaidActive;
+
+  const checkoutMutation = useMutation({
+    mutationFn: () =>
+      createLumePlusCheckoutSession({
+        data: { origin: window.location.origin },
+      }),
+    onSuccess: ({ url }) => {
+      window.location.assign(url);
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not open Lume Plus checkout."),
+  });
+
+  const confirmPlusMutation = useMutation({
+    mutationFn: (sessionId: string) =>
+      confirmLumePlusCheckout({ data: { sessionId } }),
+    onSuccess: (subscription) => {
+      queryClient.setQueryData(LUME_PLUS_SUBSCRIPTION_QUERY_KEY, subscription);
+      setPlusDialogOpen(true);
+      setShowAllTopics(true);
+      toast.success("Lume Plus subscription active.");
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not confirm Lume Plus checkout."),
+  });
+
+  const portalMutation = useMutation({
+    mutationFn: () =>
+      createLumePlusPortalSession({
+        data: { origin: window.location.origin },
+      }),
+    onSuccess: ({ url }) => {
+      window.location.assign(url);
+    },
+    onError: (error: Error) =>
+      toast.error(error.message || "Could not open Lume Plus billing."),
   });
 
   const respondConnectionMutation = useMutation({
@@ -735,6 +897,35 @@ function Lobby() {
   }, [markConnectionMessagesReadMutation.mutate]);
 
   useEffect(() => {
+    confirmPlusCheckoutRef.current = confirmPlusMutation.mutate;
+  }, [confirmPlusMutation.mutate]);
+
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const plusReturn = params.get("plus");
+    const sessionId = params.get("session_id");
+
+    if (plusReturn === "success" && sessionId) {
+      if (!confirmPlusCheckoutStartedRef.current) {
+        confirmPlusCheckoutStartedRef.current = true;
+        confirmPlusCheckoutRef.current(sessionId);
+      }
+      clearPlusReturnParams();
+      return;
+    }
+
+    if (plusReturn === "cancelled") {
+      toast.info("Lume Plus checkout cancelled.");
+      clearPlusReturnParams();
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!plusPaidActive) return;
+    setShowAllTopics(true);
+  }, [plusPaidActive]);
+
+  useEffect(() => {
     if (profileLoading) return;
 
     const knownProfileTopics =
@@ -764,6 +955,11 @@ function Lobby() {
           topics: focusTopics,
           language: selectedLanguage,
           countryMode,
+          plus: {
+            enabled: plusAccessActive,
+            priorityBoost: plusSettings.priorityBoost,
+            smartExpansion: plusSettings.smartExpansion,
+          },
         },
       });
     },
@@ -844,14 +1040,21 @@ function Lobby() {
     if (!profile?.profile_completed) return;
     if (status === "searching" || status === "matched") return;
 
+    const presence =
+      plusAccessActive && plusSettings.incognitoIdle ? "away" : "online";
     const beat = () => {
-      void heartbeat({ data: { presence: "online" } });
+      void heartbeat({ data: { presence } });
     };
 
     beat();
     const interval = window.setInterval(beat, 45_000);
     return () => window.clearInterval(interval);
-  }, [profile?.profile_completed, status]);
+  }, [
+    plusAccessActive,
+    plusSettings.incognitoIdle,
+    profile?.profile_completed,
+    status,
+  ]);
 
   useEffect(() => {
     const userId = profile?.id;
@@ -1096,6 +1299,17 @@ function Lobby() {
     navigate({ to: "/", replace: true });
   };
 
+  const updatePlusSetting = (
+    key: LumePlusSettingKey,
+    value: LumePlusSettings[LumePlusSettingKey],
+  ) => {
+    setPlusSettings((current) => {
+      const next = { ...current, [key]: value };
+      persistLumePlusSettings(next);
+      return next;
+    });
+  };
+
   if (profileLoading) {
     return (
       <main className="flex min-h-screen items-center justify-center bg-background px-6">
@@ -1146,6 +1360,7 @@ function Lobby() {
       : null;
   const preferencesLocked = status !== "idle" || matchingBusy;
   const selectedTopicCount = focusTopics.length;
+  const topicLimit = plusAccessActive ? PLUS_TOPIC_LIMIT : BASIC_TOPIC_LIMIT;
   const countryLabel = formatCountryLabel(profile?.country);
   const languageLabel = getLanguageLabel(selectedLanguage);
   const topicSummary = formatTopicSelection(selectedTopicCount);
@@ -1161,13 +1376,17 @@ function Lobby() {
       ? "Messages"
       : activePanel === "alerts"
         ? "Alerts"
-        : "Settings";
+        : activePanel === "safety"
+          ? "Lume Shield"
+          : "Settings";
   const ActivePanelIcon =
     activePanel === "messages"
       ? MessageCircle
       : activePanel === "alerts"
         ? Bell
-        : Settings;
+        : activePanel === "safety"
+          ? ShieldCheck
+          : Settings;
   const trendingVibes =
     snapshot?.trendingVibes ??
     VIBE_OPTIONS.map((label) => ({ label, count: 0 }));
@@ -1192,6 +1411,36 @@ function Lobby() {
     0,
     TOPIC_CARDS.length - DEFAULT_VISIBLE_TOPIC_COUNT,
   );
+  const smartTopicPicks = buildSmartTopicSelection({
+    currentTopics: focusTopics,
+    profileTopics: profile?.interests ?? [],
+    trendLabels: trendingVibes.map((trend) => trend.label),
+    selectedVibe,
+    limit: topicLimit,
+  });
+  const plusSummaryItems = [
+    plusSettings.priorityBoost && "Priority boost",
+    plusSettings.smartExpansion && "Smart expansion",
+    plusSettings.smartTopics && "Smart topics",
+    plusSettings.incognitoIdle && "Incognito idle",
+  ].filter(Boolean);
+  const plusSummary =
+    plusAccessActive && plusSummaryItems.length > 0
+      ? plusSummaryItems.join(" / ")
+      : null;
+  const plusPriceLabel = plusSubscription?.priceLabel ?? "Monthly subscription";
+  const plusPlanStatus = plusPaidActive ? "Subscribed" : "Basic";
+  const plusRenewalLabel = plusSubscription?.currentPeriodEnd
+    ? `${plusSubscription.cancelAtPeriodEnd ? "Ends" : "Renews"} ${formatBillingDate(
+        plusSubscription.currentPeriodEnd,
+      )}`
+    : plusPriceLabel;
+  const plusStatusTitle = plusPaidActive
+    ? "Subscription active"
+    : "Subscribe to Lume Plus";
+  const plusStatusDetail = plusPaidActive
+    ? `${PLUS_TOPIC_LIMIT} topic picks, boosted ranking and a wider candidate pool are ready.`
+    : `Pay securely with Stripe to unlock ${PLUS_TOPIC_LIMIT} topic picks, boosted ranking and a wider candidate pool.`;
 
   const toggleFocusTopic = (topic: string) => {
     if (preferencesLocked) return;
@@ -1199,10 +1448,22 @@ function Lobby() {
     setFocusTopics((current) =>
       current.includes(topic)
         ? current.filter((item) => item !== topic)
-        : current.length >= 5
+        : current.length >= topicLimit
           ? current
           : [...current, topic],
     );
+  };
+
+  const applySmartTopics = () => {
+    if (!plusAccessActive) {
+      setPlusDialogOpen(true);
+      return;
+    }
+    if (preferencesLocked) return;
+
+    setFocusTopics(smartTopicPicks);
+    setShowAllTopics(true);
+    toast.success("Smart topics applied.");
   };
 
   const onPrimaryMatchAction = () => {
@@ -1258,12 +1519,14 @@ function Lobby() {
   const matchReadinessDetail =
     status === "matched" && partnerName && roomCode
       ? `Matched with ${partnerName}. Room ${roomCode}.`
-      : preferenceSummary;
+      : plusSummary
+        ? `${preferenceSummary} / ${plusSummary}`
+        : preferenceSummary;
 
   return (
     <main className="min-h-screen overflow-hidden bg-background text-foreground">
       <div className="pointer-events-none fixed inset-0 bg-[linear-gradient(90deg,rgba(255,255,255,0.035)_1px,transparent_1px),linear-gradient(rgba(255,255,255,0.035)_1px,transparent_1px)] opacity-20 [background-size:72px_72px]" />
-      <div className="relative mx-auto flex min-h-screen w-full max-w-5xl flex-col px-4 py-4 safe-top safe-bottom sm:px-6 lg:px-8">
+      <div className="relative mx-auto flex min-h-screen w-full max-w-6xl flex-col px-4 py-4 safe-top safe-bottom sm:px-6 lg:px-8">
         <header className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center">
             <div className="font-display text-3xl font-black leading-none sm:text-4xl">
@@ -1275,11 +1538,21 @@ function Lobby() {
           <div className="flex items-center gap-2 sm:gap-3">
             <Button
               variant="secondary"
-              className="h-8 rounded-lg border border-border bg-surface/80 px-3 text-xs text-primary shadow-sm backdrop-blur hover:bg-surface-raised"
-              onClick={() => toast.info("Lume Plus is coming soon.")}
+              aria-pressed={plusAccessActive}
+              className={cn(
+                "h-8 rounded-lg border bg-surface/80 px-3 text-xs text-primary shadow-sm backdrop-blur hover:bg-surface-raised",
+                plusAccessActive ? "border-primary/70" : "border-border",
+              )}
+              onClick={() => setPlusDialogOpen(true)}
             >
               <Crown className="size-4 fill-primary/25 text-primary" />
-              <span className="hidden font-semibold sm:inline">Lume Plus</span>
+              <span className="hidden font-semibold sm:inline">
+                {plusPaidActive
+                  ? "Subscribed"
+                  : plusAccessActive
+                    ? "Plus Active"
+                    : "Lume Plus"}
+              </span>
             </Button>
             <IconHeaderButton
               icon={MessageCircle}
@@ -1327,8 +1600,8 @@ function Lobby() {
             </p>
           </div>
 
-          <div className="relative min-h-[170px] overflow-hidden md:min-h-[230px]">
-            <div className="absolute inset-x-0 top-0 h-52 rounded-[1.5rem] bg-[radial-gradient(circle,rgba(255,255,255,0.16)_1px,transparent_1px)] opacity-40 [background-size:12px_12px]" />
+          <div className="surface-panel relative min-h-[170px] overflow-hidden rounded-2xl md:min-h-[230px]">
+            <div className="absolute inset-x-0 top-0 h-px bg-primary/60" />
             <img
               src={HERO_MATCH_IMAGE}
               alt="Two Lume members matched in a video call preview"
@@ -1337,7 +1610,7 @@ function Lobby() {
           </div>
         </section>
 
-        <section className="grid overflow-hidden rounded-xl border border-border bg-surface/70 shadow-lg shadow-black/15 backdrop-blur sm:grid-cols-3">
+        <section className="surface-panel grid overflow-hidden rounded-2xl sm:grid-cols-3">
           <StatMetric
             icon={Radio}
             iconClassName="border-success/30 bg-success/10 text-success"
@@ -1369,7 +1642,7 @@ function Lobby() {
           />
         </section>
 
-        <section className="mt-3 flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface/55 p-1.5 backdrop-blur">
+        <section className="surface-panel mt-3 flex flex-wrap items-center gap-2 rounded-2xl p-2">
           <div className="flex h-8 items-center gap-2 rounded-full px-2 text-xs font-semibold">
             <Flame className="size-4 fill-primary text-primary" />
             TRENDING NOW
@@ -1421,7 +1694,7 @@ function Lobby() {
           )}
         </section>
 
-        <section className="mt-3 rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur sm:p-5">
+        <section className="surface-panel mt-3 rounded-2xl p-4 sm:p-5">
           <div className="flex items-start justify-between gap-3">
             <PanelHeading
               icon={Heart}
@@ -1457,7 +1730,7 @@ function Lobby() {
           </div>
         </section>
 
-        <section className="mt-3 rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur sm:p-5">
+        <section className="surface-panel mt-3 rounded-2xl p-4 sm:p-5">
           <div className="flex items-start justify-between gap-3">
             <PanelHeading
               icon={MessageCircle}
@@ -1466,21 +1739,35 @@ function Lobby() {
               subtitle={
                 preferencesLocked
                   ? `${topicSummary} locked while matching`
-                  : `Pick up to 5 topics | ${topicSummary}`
+                  : `Pick up to ${topicLimit} topics | ${topicSummary}`
               }
             />
-            <SectionToggleButton
-              expanded={showAllTopics}
-              hiddenCount={hiddenTopicCount}
-              onClick={() => setShowAllTopics((value) => !value)}
-            />
+            <div className="flex shrink-0 items-center gap-2">
+              {plusAccessActive && plusSettings.smartTopics && (
+                <button
+                  type="button"
+                  disabled={preferencesLocked}
+                  className="inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-xs font-semibold text-primary transition hover:bg-primary/10 disabled:cursor-not-allowed disabled:opacity-60"
+                  onClick={applySmartTopics}
+                >
+                  <Sparkles className="size-3.5" />
+                  Smart pick
+                </button>
+              )}
+              <SectionToggleButton
+                expanded={showAllTopics}
+                hiddenCount={hiddenTopicCount}
+                onClick={() => setShowAllTopics((value) => !value)}
+              />
+            </div>
           </div>
           <div className="mt-4 grid gap-3 sm:grid-cols-2 md:grid-cols-3">
             {visibleTopicCards.map((card) => {
               const selected = focusTopics.includes(card.topic);
               const topicDisabled =
                 card.action !== "settings" &&
-                (preferencesLocked || (!selected && selectedTopicCount >= 5));
+                (preferencesLocked ||
+                  (!selected && selectedTopicCount >= topicLimit));
               const handleClick = () => {
                 if (card.action === "settings") {
                   setActivePanel("settings");
@@ -1505,7 +1792,7 @@ function Lobby() {
         </section>
 
         <section className="mt-3 grid gap-3 lg:grid-cols-[0.86fr_1.14fr]">
-          <div className="rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
+          <div className="surface-panel rounded-2xl p-4">
             <PanelHeading
               icon={Globe2}
               iconClassName="text-violet-300"
@@ -1532,7 +1819,7 @@ function Lobby() {
             </Select>
           </div>
 
-          <div className="rounded-xl border border-border bg-surface/70 p-4 shadow-lg shadow-black/10 backdrop-blur">
+          <div className="surface-panel rounded-2xl p-4">
             <PanelHeading
               icon={MapPin}
               iconClassName="text-violet-300"
@@ -1578,7 +1865,7 @@ function Lobby() {
           />
         )}
 
-        <section className="sticky bottom-3 z-20 mt-4 rounded-2xl border border-border bg-background/90 p-2 shadow-2xl shadow-black/25 backdrop-blur sm:bottom-4 sm:p-3">
+        <section className="sticky bottom-3 z-20 mt-4 rounded-2xl border border-border bg-background/90 p-3 shadow-2xl shadow-black/25 backdrop-blur sm:bottom-4">
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
             <MatchReadinessSummary
               icon={MatchReadinessIcon}
@@ -1609,19 +1896,20 @@ function Lobby() {
               {primaryActionText}
             </Button>
           </div>
+          <div className="mt-3 flex flex-col items-center justify-center gap-2 rounded-xl border border-border/70 bg-surface/65 px-3 py-2 text-center text-xs text-muted-foreground sm:flex-row">
+            <span className="flex min-w-0 items-center justify-center gap-2 leading-5">
+              <ShieldCheck className="size-4 shrink-0 text-success" />
+              <span>We keep Lume safe and friendly for everyone.</span>
+            </span>
+            <button
+              type="button"
+              className="inline-flex h-7 shrink-0 items-center justify-center rounded-full px-2 font-semibold text-primary transition hover:bg-primary/10 hover:text-primary/80 focus-visible:outline-none focus-visible:ring-1 focus-visible:ring-ring"
+              onClick={() => setActivePanel("safety")}
+            >
+              Learn more
+            </button>
+          </div>
         </section>
-
-        <footer className="flex flex-wrap items-center justify-center gap-2 py-4 text-center text-xs text-muted-foreground">
-          <ShieldCheck className="size-4" />
-          <span>We keep Lume safe and friendly for everyone.</span>
-          <button
-            type="button"
-            className="font-semibold text-primary transition hover:text-primary/80"
-            onClick={() => setActivePanel("alerts")}
-          >
-            Learn more
-          </button>
-        </footer>
 
         <Dialog
           open={activePanel !== null}
@@ -1645,7 +1933,9 @@ function Lobby() {
                   ? "Your saved Lume connections appear here."
                   : activePanel === "alerts"
                     ? "Recent account and safety updates."
-                    : "Quick controls for your next match."}
+                    : activePanel === "safety"
+                      ? "How reporting, blocking and call controls protect each match."
+                      : "Quick controls for your next match."}
               </DialogDescription>
             </DialogHeader>
 
@@ -1927,6 +2217,50 @@ function Lobby() {
                 </div>
               )}
 
+              {activePanel === "safety" && (
+                <div className="space-y-3">
+                  <div className="flex gap-3 rounded-xl border border-success/30 bg-success/10 p-4">
+                    <ShieldCheck className="mt-0.5 size-5 shrink-0 text-success" />
+                    <div>
+                      <p className="font-medium text-foreground">
+                        Lume Shield is on
+                      </p>
+                      <p className="text-sm text-muted-foreground">
+                        Report and block controls stay available during calls
+                        and after you skip to the next match.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="grid gap-2.5">
+                    <SettingStatus
+                      icon={<ShieldCheck className="size-4 text-success" />}
+                      label="Report a match"
+                      value="Current or previous"
+                    />
+                    <SettingStatus
+                      icon={<X className="size-4 text-primary" />}
+                      label="Block after reporting"
+                      value="Available"
+                    />
+                    <SettingStatus
+                      icon={<EyeOff className="size-4 text-primary" />}
+                      label="Camera preview"
+                      value="You control it"
+                    />
+                  </div>
+
+                  <Button
+                    variant="secondary"
+                    className="h-11 w-full rounded-xl"
+                    onClick={() => setActivePanel("alerts")}
+                  >
+                    <Bell className="size-4" />
+                    View alerts
+                  </Button>
+                </div>
+              )}
+
               {activePanel === "settings" && (
                 <div className="space-y-3 md:space-y-4">
                   <div className="flex items-center gap-3 rounded-xl border border-border bg-background p-3">
@@ -1958,23 +2292,85 @@ function Lobby() {
                     <SettingStatus
                       icon={<EyeOff className="size-4 text-primary" />}
                       label="Incognito mode"
-                      value="Soon"
+                      value={
+                        plusAccessActive && plusSettings.incognitoIdle
+                          ? "On"
+                          : plusAccessActive
+                            ? "Off"
+                            : "Plus"
+                      }
                     />
                     <SettingStatus
-                      icon={<Check className="size-4 text-primary" />}
-                      label="High trust matching"
-                      value="On"
+                      icon={
+                        <SlidersHorizontal className="size-4 text-primary" />
+                      }
+                      label="Priority boost"
+                      value={
+                        plusAccessActive && plusSettings.priorityBoost
+                          ? "On"
+                          : plusAccessActive
+                            ? "Off"
+                            : "Plus"
+                      }
                     />
                     <SettingStatus
-                      icon={<Languages className="size-4 text-primary" />}
-                      label="Auto translation"
-                      value="Soon"
+                      icon={<Globe2 className="size-4 text-primary" />}
+                      label="Smart expansion"
+                      value={
+                        plusAccessActive && plusSettings.smartExpansion
+                          ? "On"
+                          : plusAccessActive
+                            ? "Off"
+                            : "Plus"
+                      }
                     />
                     <SettingStatus
-                      icon={<MessageCircle className="size-4 text-primary" />}
-                      label="Live captions"
-                      value="Soon"
+                      icon={<Sparkles className="size-4 text-primary" />}
+                      label="Smart topic assist"
+                      value={
+                        plusAccessActive && plusSettings.smartTopics
+                          ? "On"
+                          : plusAccessActive
+                            ? "Off"
+                            : "Plus"
+                      }
                     />
+                  </div>
+
+                  <div className="grid gap-3 rounded-xl border border-border bg-background p-3 md:p-4">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <p className="font-semibold text-foreground">
+                          Lume Plus
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {plusPaidActive
+                            ? plusRenewalLabel
+                            : `${BASIC_TOPIC_LIMIT} topic matching is active.`}
+                        </p>
+                      </div>
+                      <span
+                        className={cn(
+                          "shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold",
+                          plusAccessActive
+                            ? "border-primary/40 bg-primary/15 text-primary"
+                            : "border-border bg-secondary text-muted-foreground",
+                        )}
+                      >
+                        {plusPlanStatus}
+                      </span>
+                    </div>
+                    <Button
+                      variant="secondary"
+                      className="h-10 rounded-xl"
+                      onClick={() => {
+                        setActivePanel(null);
+                        setPlusDialogOpen(true);
+                      }}
+                    >
+                      <Crown className="size-4" />
+                      Manage Lume Plus
+                    </Button>
                   </div>
 
                   <div className="grid gap-3 rounded-xl border border-border bg-background p-3 md:p-4">
@@ -2018,8 +2414,226 @@ function Lobby() {
             </div>
           </DialogContent>
         </Dialog>
+
+        <Dialog open={plusDialogOpen} onOpenChange={setPlusDialogOpen}>
+          <DialogContent className="max-h-[calc(100dvh-2rem)] max-w-lg overflow-y-auto rounded-2xl border-border bg-surface p-4 md:p-6">
+            <DialogHeader>
+              <DialogTitle className="flex items-center gap-2">
+                <Crown className="size-5 fill-primary/25 text-primary" />
+                Lume Plus
+              </DialogTitle>
+              <DialogDescription>
+                A faster, more flexible lobby for people who want better live
+                matches.
+              </DialogDescription>
+            </DialogHeader>
+
+            <div className="grid gap-3">
+              <div className="rounded-xl border border-primary/30 bg-primary/10 p-4">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <p className="font-semibold text-foreground">
+                      {plusStatusTitle}
+                    </p>
+                    <p className="mt-1 text-sm text-muted-foreground">
+                      {plusStatusDetail}
+                    </p>
+                  </div>
+                  <Sparkles className="size-8 shrink-0 text-primary" />
+                </div>
+              </div>
+
+              <div className="grid gap-2 sm:grid-cols-3">
+                <PlusMetricCard value={`${topicLimit}`} label="topic picks" />
+                <PlusMetricCard
+                  value={
+                    plusAccessActive ? `${PLUS_CANDIDATE_POOL_LIMIT}` : "24"
+                  }
+                  label="match pool"
+                />
+                <PlusMetricCard
+                  value={
+                    plusAccessActive && plusSettings.priorityBoost
+                      ? "+160"
+                      : "0"
+                  }
+                  label="boost score"
+                />
+              </div>
+
+              <div className="flex items-center justify-between gap-3 rounded-xl border border-border bg-background p-3">
+                <div className="min-w-0">
+                  <p className="text-sm font-semibold text-foreground">
+                    {plusPriceLabel}
+                  </p>
+                  <p className="mt-1 text-xs text-muted-foreground">
+                    {plusPaidActive
+                      ? plusRenewalLabel
+                      : plusSubscriptionLoading
+                        ? "Checking billing status..."
+                        : "Hosted checkout and billing by Stripe."}
+                  </p>
+                </div>
+                <span
+                  className={cn(
+                    "shrink-0 rounded-full border px-2.5 py-1 text-xs font-semibold",
+                    plusAccessActive
+                      ? "border-primary/40 bg-primary/15 text-primary"
+                      : "border-border bg-secondary text-muted-foreground",
+                  )}
+                >
+                  {plusPlanStatus}
+                </span>
+              </div>
+
+              <div className="grid gap-2">
+                <PlusFeatureToggle
+                  icon={SlidersHorizontal}
+                  title="Priority boost"
+                  body="Ranks your queue entry higher when another member searches."
+                  checked={plusSettings.priorityBoost}
+                  onCheckedChange={(checked) =>
+                    updatePlusSetting("priorityBoost", checked)
+                  }
+                />
+                <PlusFeatureToggle
+                  icon={Globe2}
+                  title="Smart expansion"
+                  body="Widens strict matching immediately when filters are too narrow."
+                  checked={plusSettings.smartExpansion}
+                  onCheckedChange={(checked) =>
+                    updatePlusSetting("smartExpansion", checked)
+                  }
+                />
+                <PlusFeatureToggle
+                  icon={Sparkles}
+                  title="Smart topic assist"
+                  body="Builds a stronger topic set from your profile, trends and vibe."
+                  checked={plusSettings.smartTopics}
+                  onCheckedChange={(checked) =>
+                    updatePlusSetting("smartTopics", checked)
+                  }
+                />
+                <PlusFeatureToggle
+                  icon={EyeOff}
+                  title="Incognito idle"
+                  body="Shows you as away in the lobby until you start matching."
+                  checked={plusSettings.incognitoIdle}
+                  onCheckedChange={(checked) =>
+                    updatePlusSetting("incognitoIdle", checked)
+                  }
+                />
+              </div>
+
+              <div className="flex flex-col gap-2 sm:flex-row">
+                {plusAccessActive && (
+                  <>
+                    <Button
+                      className="h-11 flex-1 rounded-xl"
+                      disabled={matchingBusy || status !== "idle"}
+                      onClick={() => {
+                        setPlusDialogOpen(false);
+                        startMutation.mutate();
+                      }}
+                    >
+                      {startMutation.isPending ? (
+                        <Loader2 className="size-4 animate-spin" />
+                      ) : (
+                        <Video className="size-4" />
+                      )}
+                      Start Plus match
+                    </Button>
+                    <Button
+                      variant="secondary"
+                      className="h-11 rounded-xl"
+                      disabled={preferencesLocked || !plusSettings.smartTopics}
+                      onClick={applySmartTopics}
+                    >
+                      <Sparkles className="size-4" />
+                      Smart pick topics
+                    </Button>
+                  </>
+                )}
+                {plusPaidActive ? (
+                  <Button
+                    variant="secondary"
+                    className="h-11 rounded-xl"
+                    disabled={portalMutation.isPending}
+                    onClick={() => portalMutation.mutate()}
+                  >
+                    {portalMutation.isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <CreditCard className="size-4" />
+                    )}
+                    Manage billing
+                  </Button>
+                ) : (
+                  <Button
+                    className="h-11 flex-1 rounded-xl"
+                    disabled={
+                      checkoutMutation.isPending ||
+                      confirmPlusMutation.isPending
+                    }
+                    onClick={() => checkoutMutation.mutate()}
+                  >
+                    {checkoutMutation.isPending ||
+                    confirmPlusMutation.isPending ? (
+                      <Loader2 className="size-4 animate-spin" />
+                    ) : (
+                      <CreditCard className="size-4" />
+                    )}
+                    Subscribe
+                  </Button>
+                )}
+              </div>
+            </div>
+          </DialogContent>
+        </Dialog>
       </div>
     </main>
+  );
+}
+
+function PlusMetricCard({ value, label }: { value: string; label: string }) {
+  return (
+    <div className="rounded-xl border border-border bg-background p-3 text-center">
+      <p className="text-lg font-black leading-none text-foreground">{value}</p>
+      <p className="mt-1 text-xs font-semibold text-muted-foreground">
+        {label}
+      </p>
+    </div>
+  );
+}
+
+function PlusFeatureToggle({
+  icon: Icon,
+  title,
+  body,
+  checked,
+  onCheckedChange,
+}: {
+  icon: LucideIcon;
+  title: string;
+  body: string;
+  checked: boolean;
+  onCheckedChange: (checked: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center gap-3 rounded-xl border border-border bg-background p-3">
+      <div className="flex size-9 shrink-0 items-center justify-center rounded-lg bg-primary/15">
+        <Icon className="size-4 text-primary" />
+      </div>
+      <div className="min-w-0 flex-1">
+        <p className="text-sm font-semibold text-foreground">{title}</p>
+        <p className="mt-1 text-xs text-muted-foreground">{body}</p>
+      </div>
+      <Switch
+        aria-label={title}
+        checked={checked}
+        onCheckedChange={onCheckedChange}
+      />
+    </div>
   );
 }
 
@@ -2502,6 +3116,14 @@ function formatSocialTime(value: string) {
     day: "numeric",
     hour: "numeric",
     minute: "2-digit",
+  }).format(new Date(value));
+}
+
+function formatBillingDate(value: string) {
+  return new Intl.DateTimeFormat("en", {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
   }).format(new Date(value));
 }
 

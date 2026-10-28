@@ -48,65 +48,72 @@ function Landing() {
   const { session, loading } = useSession();
 
   return (
-    <main className="relative min-h-screen overflow-hidden bg-background">
-      <div className="pointer-events-none absolute -top-40 left-1/2 h-96 w-96 -translate-x-1/2 rounded-full bg-primary/20 blur-[120px]" />
-
-      <div className="relative mx-auto flex min-h-screen w-full max-w-md flex-col px-6 safe-top safe-bottom">
-        <header className="flex items-center justify-between py-6">
-          <span className="font-display text-xl font-bold tracking-tight text-foreground">
+    <main className="min-h-screen overflow-hidden bg-background">
+      <div className="mx-auto flex min-h-screen w-full max-w-6xl flex-col px-5 safe-top sm:px-8 lg:px-10">
+        <header className="flex items-center justify-between py-6 sm:py-8">
+          <span className="font-display text-2xl font-extrabold text-foreground">
             lume<span className="text-primary">.</span>
           </span>
           {!loading &&
             (session ? (
-              <Button asChild variant="ghost" size="sm">
+              <Button asChild variant="secondary" size="sm" className="px-4">
                 <Link to="/lobby">Open app</Link>
               </Button>
             ) : (
-              <Button asChild variant="ghost" size="sm">
+              <Button asChild variant="secondary" size="sm" className="px-4">
                 <Link to="/auth">Sign in</Link>
               </Button>
             ))}
         </header>
 
-        <section className="flex flex-1 flex-col justify-center py-10">
-          <div className="animate-rise">
-            <div className="mb-6 inline-flex items-center gap-2 rounded-full border border-border bg-surface px-3 py-1 text-xs text-muted-foreground">
+        <section className="grid flex-1 items-center gap-10 py-8 lg:grid-cols-[0.92fr_1.08fr] lg:gap-16 lg:py-12">
+          <div className="animate-rise max-w-xl">
+            <div className="mb-7 inline-flex items-center gap-2 rounded-full border border-border bg-surface/80 px-3 py-1.5 text-xs font-semibold text-muted-foreground shadow-sm">
               <Sparkles className="size-3.5 text-primary" />
               18+ · moderated · worldwide
             </div>
-            <h1 className="text-5xl leading-[1.05] font-bold text-foreground">
-              Meet someone new,
-              <span className="block text-primary">right now.</span>
+            <h1 className="font-display text-5xl font-extrabold leading-[1.02] text-foreground sm:text-6xl">
+              Meet someone new.
+              <span className="block text-primary">Feel the spark.</span>
             </h1>
-            <p className="mt-5 text-base text-muted-foreground">
+            <p className="mt-6 max-w-lg text-base leading-7 text-muted-foreground sm:text-lg">
               Lume drops you into a live one-to-one video call with a stranger
               in seconds. Say hi, or skip to the next.
             </p>
 
-            <div className="mt-8 space-y-3">
+            <div className="mt-8 flex flex-col gap-3 sm:flex-row">
               <Button
                 asChild
                 size="lg"
-                className="ember-lift h-14 w-full rounded-2xl text-base"
+                className="ember-lift h-14 w-full rounded-xl px-7 text-base sm:w-auto"
               >
                 <Link to={session ? "/lobby" : "/auth"}>
                   {session ? "Start matching" : "Get started free"}
                 </Link>
               </Button>
-              <p className="text-center text-xs text-muted-foreground">
-                By continuing you confirm you are 18 or older.
-              </p>
             </div>
+            <p className="mt-4 text-xs text-muted-foreground">
+              By continuing you confirm you are 18 or older.
+            </p>
+          </div>
+
+          <div className="relative mx-auto w-full max-w-xl lg:max-w-none">
+            <div className="absolute -inset-3 rounded-[2rem] border border-primary/20 bg-primary/5" />
+            <img
+              src="/lume-assets/hero-match.png"
+              alt="Two people connecting through a Lume video call"
+              className="relative aspect-[1.18] w-full object-contain"
+            />
           </div>
         </section>
 
-        <section className="space-y-3 pb-10">
+        <section className="grid gap-px border-y border-border bg-border sm:grid-cols-3">
           {FEATURES.map(({ icon: Icon, title, body }) => (
             <div
               key={title}
-              className="flex gap-4 rounded-2xl border border-border bg-surface p-4"
+              className="flex gap-4 bg-background px-2 py-6 sm:px-6"
             >
-              <div className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-primary/12">
+              <div className="flex size-10 shrink-0 items-center justify-center rounded-lg border border-primary/25 bg-primary/10">
                 <Icon className="size-5 text-primary" />
               </div>
               <div>
@@ -118,6 +125,9 @@ function Landing() {
             </div>
           ))}
         </section>
+        <div className="py-5 text-center text-xs text-muted-foreground safe-bottom">
+          Real conversations, on your terms.
+        </div>
       </div>
     </main>
   );

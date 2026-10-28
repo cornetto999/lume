@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { toast } from "sonner";
-import { Loader2, Eye, EyeOff } from "lucide-react";
+import { Loader2, Eye, EyeOff, Sparkles } from "lucide-react";
 import { supabase } from "@/integrations/supabase/client";
 import { getGoogleSignInUrl, isGoogleSignInEnabled } from "@/lib/auth";
 import { Button } from "@/components/ui/button";
@@ -96,118 +96,142 @@ function AuthPage() {
   };
 
   return (
-    <main className="relative flex min-h-screen flex-col overflow-hidden bg-background">
-      <div className="pointer-events-none absolute -top-40 left-1/2 h-96 w-96 -translate-x-1/2 rounded-full bg-primary/20 blur-[120px]" />
-
-      <div className="relative mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-6 py-10 safe-top safe-bottom">
-        <Link
-          to="/"
-          className="font-display text-xl font-bold tracking-tight text-foreground"
-        >
-          lume<span className="text-primary">.</span>
-        </Link>
-
-        <h1 className="mt-8 text-3xl font-bold text-foreground">
-          Welcome to Lume
-        </h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          One tap and you're in a live conversation. You must be 18 or older.
-        </p>
-
-        {googleUrl ? (
-          <Button
-            asChild
-            size="lg"
-            className="mt-8 h-14 w-full rounded-2xl text-base"
+    <main className="min-h-screen bg-background">
+      <div className="mx-auto grid min-h-screen max-w-6xl lg:grid-cols-[0.95fr_1.05fr]">
+        <section className="hidden border-r border-border bg-surface/55 p-10 lg:flex lg:flex-col lg:justify-between">
+          <Link
+            to="/"
+            className="font-display text-2xl font-extrabold text-foreground"
           >
-            <a href={googleUrl}>Continue with Google</a>
-          </Button>
-        ) : (
-          <Button
-            onClick={() => setMode("signup")}
-            size="lg"
-            className="mt-8 h-14 w-full rounded-2xl text-base"
+            lume<span className="text-primary">.</span>
+          </Link>
+          <div>
+            <div className="mb-6 flex size-11 items-center justify-center rounded-xl border border-primary/25 bg-primary/10">
+              <Sparkles className="size-5 text-primary" />
+            </div>
+            <h1 className="max-w-sm font-display text-5xl font-extrabold leading-tight text-foreground">
+              A good conversation is one tap away.
+            </h1>
+            <p className="mt-5 max-w-sm text-base leading-7 text-muted-foreground">
+              Meet new people live, with clear safety controls from the first
+              hello.
+            </p>
+          </div>
+          <p className="text-sm text-muted-foreground">
+            18+ · moderated · worldwide
+          </p>
+        </section>
+
+        <div className="mx-auto flex w-full max-w-md flex-1 flex-col justify-center px-6 py-10 safe-top safe-bottom lg:px-10">
+          <Link
+            to="/"
+            className="font-display text-2xl font-extrabold text-foreground lg:hidden"
           >
-            Create account with email
-          </Button>
-        )}
+            lume<span className="text-primary">.</span>
+          </Link>
 
-        <div className="my-7 flex items-center gap-3 text-xs text-muted-foreground">
-          <span className="h-px flex-1 bg-border" />
-          {googleUrl ? "or use email" : "or sign in"}
-          <span className="h-px flex-1 bg-border" />
-        </div>
+          <h1 className="mt-8 font-display text-3xl font-bold text-foreground lg:mt-0">
+            Welcome back
+          </h1>
+          <p className="mt-2 text-sm leading-6 text-muted-foreground">
+            One tap and you're in a live conversation. You must be 18 or older.
+          </p>
 
-        <Tabs
-          value={mode}
-          onValueChange={(value) => setMode(value as AuthMode)}
-        >
-          <TabsList className="grid w-full grid-cols-2">
-            <TabsTrigger value="signin">Sign in</TabsTrigger>
-            <TabsTrigger value="signup">Create account</TabsTrigger>
-          </TabsList>
+          {googleUrl ? (
+            <Button
+              asChild
+              size="lg"
+              className="mt-8 h-14 w-full rounded-xl text-base"
+            >
+              <a href={googleUrl}>Continue with Google</a>
+            </Button>
+          ) : (
+            <Button
+              onClick={() => setMode("signup")}
+              size="lg"
+              className="mt-8 h-14 w-full rounded-xl text-base"
+            >
+              Create account with email
+            </Button>
+          )}
 
-          {(["signin", "signup"] as const).map((mode) => (
-            <TabsContent key={mode} value={mode} className="mt-5 space-y-4">
-              <div className="space-y-2">
-                <Label htmlFor={`${mode}-email`}>Email</Label>
-                <Input
-                  id={`${mode}-email`}
-                  type="email"
-                  autoComplete="email"
-                  value={email}
-                  onChange={(e) => setEmail(e.target.value)}
-                  placeholder="you@example.com"
-                  className="h-12 rounded-xl"
-                />
-              </div>
-              <div className="space-y-2">
-                <Label htmlFor={`${mode}-password`}>Password</Label>
-                <div className="relative">
+          <div className="my-7 flex items-center gap-3 text-xs text-muted-foreground">
+            <span className="h-px flex-1 bg-border" />
+            {googleUrl ? "or use email" : "or sign in"}
+            <span className="h-px flex-1 bg-border" />
+          </div>
+
+          <Tabs
+            value={mode}
+            onValueChange={(value) => setMode(value as AuthMode)}
+          >
+            <TabsList className="grid w-full grid-cols-2">
+              <TabsTrigger value="signin">Sign in</TabsTrigger>
+              <TabsTrigger value="signup">Create account</TabsTrigger>
+            </TabsList>
+
+            {(["signin", "signup"] as const).map((mode) => (
+              <TabsContent key={mode} value={mode} className="mt-5 space-y-4">
+                <div className="space-y-2">
+                  <Label htmlFor={`${mode}-email`}>Email</Label>
                   <Input
-                    id={`${mode}-password`}
-                    type={showPassword ? "text" : "password"}
-                    autoComplete={
-                      mode === "signin" ? "current-password" : "new-password"
-                    }
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    placeholder="At least 8 characters"
-                    className="h-12 rounded-xl pr-10"
+                    id={`${mode}-email`}
+                    type="email"
+                    autoComplete="email"
+                    value={email}
+                    onChange={(e) => setEmail(e.target.value)}
+                    placeholder="you@example.com"
+                    className="h-12 rounded-xl"
                   />
-                  <button
-                    type="button"
-                    onClick={() => setShowPassword(!showPassword)}
-                    className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground focus:outline-none"
-                  >
-                    {showPassword ? (
-                      <EyeOff className="size-5" />
-                    ) : (
-                      <Eye className="size-5" />
-                    )}
-                    <span className="sr-only">
-                      {showPassword ? "Hide password" : "Show password"}
-                    </span>
-                  </button>
                 </div>
-              </div>
-              <Button
-                onClick={() => submit(mode)}
-                disabled={busy}
-                variant="secondary"
-                className="h-12 w-full rounded-xl"
-              >
-                {busy ? (
-                  <Loader2 className="size-4 animate-spin" />
-                ) : mode === "signin" ? (
-                  "Sign in"
-                ) : (
-                  "Create account"
-                )}
-              </Button>
-            </TabsContent>
-          ))}
-        </Tabs>
+                <div className="space-y-2">
+                  <Label htmlFor={`${mode}-password`}>Password</Label>
+                  <div className="relative">
+                    <Input
+                      id={`${mode}-password`}
+                      type={showPassword ? "text" : "password"}
+                      autoComplete={
+                        mode === "signin" ? "current-password" : "new-password"
+                      }
+                      value={password}
+                      onChange={(e) => setPassword(e.target.value)}
+                      placeholder="At least 8 characters"
+                      className="h-12 rounded-xl pr-10"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setShowPassword(!showPassword)}
+                      className="absolute right-3 top-1/2 -translate-y-1/2 text-muted-foreground hover:text-foreground focus:outline-none"
+                    >
+                      {showPassword ? (
+                        <EyeOff className="size-5" />
+                      ) : (
+                        <Eye className="size-5" />
+                      )}
+                      <span className="sr-only">
+                        {showPassword ? "Hide password" : "Show password"}
+                      </span>
+                    </button>
+                  </div>
+                </div>
+                <Button
+                  onClick={() => submit(mode)}
+                  disabled={busy}
+                  variant="secondary"
+                  className="h-12 w-full rounded-lg"
+                >
+                  {busy ? (
+                    <Loader2 className="size-4 animate-spin" />
+                  ) : mode === "signin" ? (
+                    "Sign in"
+                  ) : (
+                    "Create account"
+                  )}
+                </Button>
+              </TabsContent>
+            ))}
+          </Tabs>
+        </div>
       </div>
     </main>
   );

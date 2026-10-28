@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { Check, Loader2 } from "lucide-react";
+import { Check, Loader2, Sparkles } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -130,142 +130,160 @@ function Onboarding() {
 
   return (
     <main className="min-h-screen bg-background">
-      <div className="mx-auto w-full max-w-md px-6 py-10 safe-top safe-bottom">
-        <h1 className="text-3xl font-bold text-foreground">Your profile</h1>
-        <p className="mt-2 text-sm text-muted-foreground">
-          This is what other members see. Your date of birth stays private —
-          it's only used for the 18+ check.
-        </p>
-
-        <div className="mt-8 space-y-5">
-          <div className="space-y-2">
-            <Label htmlFor="display-name">Display name</Label>
-            <Input
-              id="display-name"
-              value={displayName}
-              onChange={(e) => setDisplayName(e.target.value)}
-              placeholder="Alex"
-              className="h-12 rounded-xl"
-            />
+      <div className="mx-auto w-full max-w-2xl px-5 py-8 safe-top safe-bottom sm:px-8 sm:py-12">
+        <div className="mx-auto max-w-xl">
+          <div className="flex items-center justify-between">
+            <span className="font-display text-2xl font-extrabold text-foreground">
+              lume<span className="text-primary">.</span>
+            </span>
+            <span className="inline-flex items-center gap-1.5 rounded-full border border-border bg-surface px-3 py-1.5 text-xs font-semibold text-muted-foreground">
+              <Sparkles className="size-3.5 text-primary" />
+              Profile setup
+            </span>
           </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="username">Username</Label>
-            <Input
-              id="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value.toLowerCase())}
-              placeholder="alex_92"
-              className="h-12 rounded-xl"
-            />
-            <p
-              className={cn(
-                "text-xs",
-                nameState === "ok" ? "text-success" : "text-muted-foreground",
-                (nameState === "taken" || nameState === "invalid") &&
-                  "text-destructive",
-              )}
-            >
-              {nameState === "checking" && "Checking availability…"}
-              {nameState === "ok" && "Available"}
-              {nameState === "taken" && "That username is taken"}
-              {nameState === "invalid" &&
-                "3–20 characters: lowercase letters, numbers, underscore"}
-              {nameState === "idle" &&
-                "3–20 characters: lowercase letters, numbers, underscore"}
-            </p>
+          <div className="mt-9 flex items-center gap-3">
+            <div className="h-1.5 flex-1 rounded-full bg-primary" />
+            <div className="h-1.5 flex-1 rounded-full bg-primary/40" />
+            <div className="h-1.5 flex-1 rounded-full bg-primary/15" />
           </div>
+          <h1 className="mt-8 font-display text-4xl font-bold text-foreground">
+            Make it yours
+          </h1>
+          <p className="mt-3 text-sm leading-6 text-muted-foreground">
+            This is what other members see. Your date of birth stays private —
+            it's only used for the 18+ check.
+          </p>
 
-          <div className="space-y-2">
-            <Label htmlFor="dob">Date of birth</Label>
-            <Input
-              id="dob"
-              type="date"
-              value={dob}
-              onChange={(e) => setDob(e.target.value)}
-              className="h-12 rounded-xl"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="gender">Gender</Label>
-            <Select
-              value={gender}
-              onValueChange={(v) => setGender(v as GenderType)}
-            >
-              <SelectTrigger id="gender" className="h-12 rounded-xl">
-                <SelectValue placeholder="Select" />
-              </SelectTrigger>
-              <SelectContent>
-                {(Object.keys(GENDER_LABELS) as GenderType[]).map((key) => (
-                  <SelectItem key={key} value={key}>
-                    {GENDER_LABELS[key]}
-                  </SelectItem>
-                ))}
-              </SelectContent>
-            </Select>
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="country">Country</Label>
-            <Input
-              id="country"
-              value={country}
-              onChange={(e) => setCountry(e.target.value)}
-              placeholder="Philippines"
-              className="h-12 rounded-xl"
-            />
-          </div>
-
-          <div className="space-y-2">
-            <Label htmlFor="bio">Bio</Label>
-            <Textarea
-              id="bio"
-              value={bio}
-              onChange={(e) => setBio(e.target.value.slice(0, 200))}
-              placeholder="A line about you…"
-              className="min-h-24 rounded-xl"
-            />
-            <p className="text-xs text-muted-foreground">{bio.length}/200</p>
-          </div>
-
-          <div className="space-y-2">
-            <Label>Interests</Label>
-            <div className="flex flex-wrap gap-2">
-              {INTEREST_OPTIONS.map((option) => {
-                const active = interests.includes(option);
-                return (
-                  <button
-                    key={option}
-                    type="button"
-                    onClick={() => toggleInterest(option)}
-                    className={cn(
-                      "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors",
-                      active
-                        ? "border-primary bg-primary/15 text-foreground"
-                        : "border-border bg-surface text-muted-foreground hover:text-foreground",
-                    )}
-                  >
-                    {active && <Check className="size-3.5 text-primary" />}
-                    {option}
-                  </button>
-                );
-              })}
+          <div className="surface-panel mt-8 space-y-5 rounded-2xl p-5 sm:p-7">
+            <div className="space-y-2">
+              <Label htmlFor="display-name">Display name</Label>
+              <Input
+                id="display-name"
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="Alex"
+                className="h-12 rounded-xl"
+              />
             </div>
-          </div>
 
-          <Button
-            size="lg"
-            disabled={!ready || mutation.isPending}
-            onClick={() => mutation.mutate()}
-            className="ember-lift h-14 w-full rounded-2xl text-base"
-          >
-            {mutation.isPending ? (
-              <Loader2 className="size-4 animate-spin" />
-            ) : (
-              "Finish setup"
-            )}
-          </Button>
+            <div className="space-y-2">
+              <Label htmlFor="username">Username</Label>
+              <Input
+                id="username"
+                value={username}
+                onChange={(e) => setUsername(e.target.value.toLowerCase())}
+                placeholder="alex_92"
+                className="h-12 rounded-xl"
+              />
+              <p
+                className={cn(
+                  "text-xs",
+                  nameState === "ok" ? "text-success" : "text-muted-foreground",
+                  (nameState === "taken" || nameState === "invalid") &&
+                    "text-destructive",
+                )}
+              >
+                {nameState === "checking" && "Checking availability…"}
+                {nameState === "ok" && "Available"}
+                {nameState === "taken" && "That username is taken"}
+                {nameState === "invalid" &&
+                  "3–20 characters: lowercase letters, numbers, underscore"}
+                {nameState === "idle" &&
+                  "3–20 characters: lowercase letters, numbers, underscore"}
+              </p>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="dob">Date of birth</Label>
+              <Input
+                id="dob"
+                type="date"
+                value={dob}
+                onChange={(e) => setDob(e.target.value)}
+                className="h-12 rounded-xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="gender">Gender</Label>
+              <Select
+                value={gender}
+                onValueChange={(v) => setGender(v as GenderType)}
+              >
+                <SelectTrigger id="gender" className="h-12 rounded-xl">
+                  <SelectValue placeholder="Select" />
+                </SelectTrigger>
+                <SelectContent>
+                  {(Object.keys(GENDER_LABELS) as GenderType[]).map((key) => (
+                    <SelectItem key={key} value={key}>
+                      {GENDER_LABELS[key]}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="country">Country</Label>
+              <Input
+                id="country"
+                value={country}
+                onChange={(e) => setCountry(e.target.value)}
+                placeholder="Philippines"
+                className="h-12 rounded-xl"
+              />
+            </div>
+
+            <div className="space-y-2">
+              <Label htmlFor="bio">Bio</Label>
+              <Textarea
+                id="bio"
+                value={bio}
+                onChange={(e) => setBio(e.target.value.slice(0, 200))}
+                placeholder="A line about you…"
+                className="min-h-24 rounded-xl"
+              />
+              <p className="text-xs text-muted-foreground">{bio.length}/200</p>
+            </div>
+
+            <div className="space-y-2">
+              <Label>Interests</Label>
+              <div className="flex flex-wrap gap-2">
+                {INTEREST_OPTIONS.map((option) => {
+                  const active = interests.includes(option);
+                  return (
+                    <button
+                      key={option}
+                      type="button"
+                      onClick={() => toggleInterest(option)}
+                      className={cn(
+                        "inline-flex items-center gap-1.5 rounded-full border px-3 py-1.5 text-sm transition-colors",
+                        active
+                          ? "border-primary bg-primary/15 text-foreground"
+                          : "border-border bg-surface text-muted-foreground hover:text-foreground",
+                      )}
+                    >
+                      {active && <Check className="size-3.5 text-primary" />}
+                      {option}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            <Button
+              size="lg"
+              disabled={!ready || mutation.isPending}
+              onClick={() => mutation.mutate()}
+              className="ember-lift h-14 w-full rounded-xl text-base"
+            >
+              {mutation.isPending ? (
+                <Loader2 className="size-4 animate-spin" />
+              ) : (
+                "Finish setup"
+              )}
+            </Button>
+          </div>
         </div>
       </div>
     </main>

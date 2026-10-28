@@ -1,6 +1,7 @@
 node_modules/
 .output/
 .wrangler/
+.DS_Store
 
 .env
 .env.*

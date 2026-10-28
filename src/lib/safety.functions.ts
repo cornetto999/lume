@@ -14,6 +14,8 @@ const REPORT_REASONS = [
   "other",
 ] as const;
 
+const ACTIVE_CALL_STATUSES = new Set(["pending", "connecting", "connected"]);
+
 const safetyReportSchema = z.object({
   sessionId: z.string().uuid(),
   reportedId: z.string().uuid(),
@@ -21,6 +23,54 @@ const safetyReportSchema = z.object({
   details: z.string().trim().max(1000).optional().default(""),
   block: z.boolean().default(false),
 });
+
+export type PreviousReportableMatch = {
+  sessionId: string;
+  reportedId: string;
+  partnerName: string;
+};
+
+function getProfileDisplayName(
+  profile: { display_name: string | null; username: string | null } | null,
+) {
+  return profile?.display_name || profile?.username || "Your previous match";
+}
+
+export const getPreviousReportableMatch = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }): Promise<PreviousReportableMatch | null> => {
+    const { getSupabaseAdmin } =
+      await import("@/integrations/supabase/client.server");
+    const supabaseAdmin = await getSupabaseAdmin();
+
+    const { data: session, error: sessionError } = await supabaseAdmin
+      .from("call_sessions")
+      .select("id, user_a, user_b")
+      .or(`user_a.eq.${context.userId},user_b.eq.${context.userId}`)
+      .in("status", ["ended", "failed"])
+      .order("started_at", { ascending: false })
+      .limit(1)
+      .maybeSingle();
+
+    if (sessionError) throw new Error(sessionError.message);
+    if (!session) return null;
+
+    const reportedId =
+      session.user_a === context.userId ? session.user_b : session.user_a;
+    const { data: profile, error: profileError } = await supabaseAdmin
+      .from("profiles")
+      .select("display_name, username")
+      .eq("id", reportedId)
+      .maybeSingle();
+
+    if (profileError) throw new Error(profileError.message);
+
+    return {
+      sessionId: session.id,
+      reportedId,
+      partnerName: getProfileDisplayName(profile),
+    };
+  });
 
 export const fileSafetyReport = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
@@ -45,7 +95,7 @@ export const fileSafetyReport = createServerFn({ method: "POST" })
       session.user_a === context.userId ? session.user_b : session.user_a;
 
     if (!currentUserIsParticipant || data.reportedId !== partnerId) {
-      throw new Error("You can only report the person in your current call.");
+      throw new Error("You can only report the person in this call session.");
     }
 
     const { data: report, error: reportError } = await supabaseAdmin
@@ -66,45 +116,49 @@ export const fileSafetyReport = createServerFn({ method: "POST" })
       return { ok: true, reportId: report.id, blocked: false };
     }
 
+    const { error: blockError } = await supabaseAdmin.from("blocks").upsert(
+      {
+        blocker_id: context.userId,
+        blocked_id: data.reportedId,
+      },
+      { onConflict: "blocker_id,blocked_id" },
+    );
+    if (blockError) throw new Error(blockError.message);
+
+    if (!ACTIVE_CALL_STATUSES.has(session.status)) {
+      return { ok: true, reportId: report.id, blocked: true };
+    }
+
     const now = new Date().toISOString();
     const startedAt = Date.parse(session.started_at);
     const durationSeconds = Number.isFinite(startedAt)
       ? Math.max(0, Math.round((Date.now() - startedAt) / 1000))
       : null;
 
-    const [blockResult, sessionUpdate, queueUpdate, profileUpdate] =
-      await Promise.all([
-        supabaseAdmin.from("blocks").upsert(
-          {
-            blocker_id: context.userId,
-            blocked_id: data.reportedId,
-          },
-          { onConflict: "blocker_id,blocked_id" },
-        ),
-        supabaseAdmin
-          .from("call_sessions")
-          .update({
-            status: "ended",
-            ended_at: now,
-            ended_by: context.userId,
-            end_reason: "safety_block",
-            duration_seconds: durationSeconds,
-          })
-          .eq("id", data.sessionId),
-        supabaseAdmin
-          .from("matchmaking_queue")
-          .update({
-            status: "cancelled",
-            heartbeat_at: now,
-          })
-          .eq("session_id", data.sessionId),
-        supabaseAdmin
-          .from("profiles")
-          .update({ presence: "online", last_active_at: now })
-          .in("id", [session.user_a, session.user_b]),
-      ]);
+    const [sessionUpdate, queueUpdate, profileUpdate] = await Promise.all([
+      supabaseAdmin
+        .from("call_sessions")
+        .update({
+          status: "ended",
+          ended_at: now,
+          ended_by: context.userId,
+          end_reason: "safety_block",
+          duration_seconds: durationSeconds,
+        })
+        .eq("id", data.sessionId),
+      supabaseAdmin
+        .from("matchmaking_queue")
+        .update({
+          status: "cancelled",
+          heartbeat_at: now,
+        })
+        .eq("session_id", data.sessionId),
+      supabaseAdmin
+        .from("profiles")
+        .update({ presence: "online", last_active_at: now })
+        .in("id", [session.user_a, session.user_b]),
+    ]);
 
-    if (blockResult.error) throw new Error(blockResult.error.message);
     if (sessionUpdate.error) throw new Error(sessionUpdate.error.message);
     if (queueUpdate.error) throw new Error(queueUpdate.error.message);
     if (profileUpdate.error) throw new Error(profileUpdate.error.message);

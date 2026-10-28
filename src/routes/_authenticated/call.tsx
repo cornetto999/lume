@@ -63,7 +63,10 @@ import {
   startMatching,
   type MatchmakingState,
 } from "@/lib/matchmaking.functions";
-import { fileSafetyReport } from "@/lib/safety.functions";
+import {
+  fileSafetyReport,
+  getPreviousReportableMatch,
+} from "@/lib/safety.functions";
 import { cn } from "@/lib/utils";
 import {
   DEFAULT_MATCH_PREFERENCES,
@@ -80,6 +83,13 @@ import {
 type CameraState = "off" | "starting" | "ready" | "blocked" | "unsupported";
 type RtcStatus =
   "idle" | "waiting" | "connecting" | "live" | "disconnected" | "failed";
+
+type ReportTarget = {
+  sessionId: string;
+  reportedId: string;
+  partnerName: string;
+  isPrevious: boolean;
+};
 
 type RtcSignalPayload = {
   sessionId: string;
@@ -173,6 +183,10 @@ function CallRoom() {
   const [reportReason, setReportReason] = useState<ReportReason>("harassment");
   const [reportDetails, setReportDetails] = useState("");
   const [blockAfterReport, setBlockAfterReport] = useState(false);
+  const [lastReportableMatch, setLastReportableMatch] = useState<Omit<
+    ReportTarget,
+    "isPrevious"
+  > | null>(null);
   const [chatOpen, setChatOpen] = useState(false);
   const [chatInput, setChatInput] = useState("");
   const [chatUnreadCount, setChatUnreadCount] = useState(0);
@@ -298,6 +312,15 @@ function CallRoom() {
     throwOnError: false,
     refetchInterval: status === "matched" ? 1_500 : false,
   });
+
+  const { data: previousReportableMatch } = useQuery({
+    queryKey: ["previous-reportable-match", profile?.id],
+    queryFn: () => getPreviousReportableMatch(),
+    enabled: !!profile?.profile_completed && status !== "matched",
+    retry: 1,
+    throwOnError: false,
+    refetchInterval: status === "searching" ? 5_000 : false,
+  });
   const roomMatchPreferences = () => ({
     ...DEFAULT_MATCH_PREFERENCES,
     topics: profile?.interests?.slice(0, 3) ?? [],
@@ -410,22 +433,18 @@ function CallRoom() {
   });
 
   const safetyMutation = useMutation({
-    mutationFn: () => {
-      if (!activeSession?.id || !partnerId) {
-        throw new Error("There is no active match to report.");
-      }
-
+    mutationFn: (target: ReportTarget) => {
       return fileSafetyReport({
         data: {
-          sessionId: activeSession.id,
-          reportedId: partnerId,
+          sessionId: target.sessionId,
+          reportedId: target.reportedId,
           reason: reportReason,
           details: reportDetails,
           block: blockAfterReport,
         },
       });
     },
-    onSuccess: (result) => {
+    onSuccess: (result, target) => {
       toast.success(
         result.blocked
           ? "Report sent and this person is blocked."
@@ -436,7 +455,7 @@ function CallRoom() {
       setBlockAfterReport(false);
       void queryClient.invalidateQueries({ queryKey: ["matchmaking-state"] });
 
-      if (result.blocked) {
+      if (result.blocked && !target.isPrevious) {
         stopFindingAfterSkip();
         setMediaRequested(false);
         stopCamera();
@@ -518,6 +537,15 @@ function CallRoom() {
     setChatUnreadCount(0);
     chatMessageCountRef.current = 0;
   }, [activeSession?.id]);
+
+  useEffect(() => {
+    if (!activeSession?.id || !partnerId) return;
+    setLastReportableMatch({
+      sessionId: activeSession.id,
+      reportedId: partnerId,
+      partnerName,
+    });
+  }, [activeSession?.id, partnerId, partnerName]);
 
   useEffect(() => {
     const previousCount = chatMessageCountRef.current;
@@ -658,7 +686,29 @@ function CallRoom() {
   const introExpired = introActive && introSecondsLeft === 0;
   const currentIcebreaker =
     ICEBREAKER_CARDS[icebreakerIndex % ICEBREAKER_CARDS.length];
-  const canUseShield = status === "matched" && !!activeSession && !!partnerId;
+  const currentReportTarget =
+    status === "matched" && activeSession?.id && partnerId
+      ? {
+          sessionId: activeSession.id,
+          reportedId: partnerId,
+          partnerName,
+          isPrevious: false,
+        }
+      : null;
+  const previousReportableTarget =
+    lastReportableMatch ?? previousReportableMatch ?? null;
+  const reportTarget: ReportTarget | null =
+    currentReportTarget ??
+    (previousReportableTarget
+      ? {
+          ...previousReportableTarget,
+          isPrevious: true,
+        }
+      : null);
+  const canUseShield = !!reportTarget;
+  const showShieldButton =
+    status === "matched" ||
+    (status === "searching" && !!previousReportableTarget);
   const canSendChat = status === "matched";
   const connectionState = callConnection?.state ?? "none";
   const friendActionBusy =
@@ -988,6 +1038,17 @@ function CallRoom() {
                     Start matching
                   </Button>
                 )}
+                {status === "searching" && previousReportableTarget && (
+                  <Button
+                    variant="secondary"
+                    className="mt-2 h-10 rounded-xl"
+                    disabled={safetyMutation.isPending}
+                    onClick={() => setShieldOpen(true)}
+                  >
+                    <ShieldCheck className="size-4" />
+                    Report previous match
+                  </Button>
+                )}
               </div>
             )}
             <div
@@ -1202,7 +1263,7 @@ function CallRoom() {
               <span className="sr-only sm:hidden">{friendActionLabel}</span>
             </Button>
           )}
-          {status === "matched" && (
+          {showShieldButton && (
             <Button
               variant="secondary"
               className="h-12 rounded-full px-4"
@@ -1210,8 +1271,14 @@ function CallRoom() {
               onClick={() => setShieldOpen(true)}
             >
               <ShieldCheck className="size-5" />
-              <span className="hidden sm:inline">Shield</span>
-              <span className="sr-only sm:hidden">Open Lume Shield</span>
+              <span className="hidden sm:inline">
+                {reportTarget?.isPrevious ? "Report previous" : "Shield"}
+              </span>
+              <span className="sr-only sm:hidden">
+                {reportTarget?.isPrevious
+                  ? "Report previous match"
+                  : "Open Lume Shield"}
+              </span>
             </Button>
           )}
           <Button
@@ -1370,8 +1437,9 @@ function CallRoom() {
                 Lume Shield
               </DialogTitle>
               <DialogDescription>
-                Send this session to moderation. Blocking also prevents future
-                matches with this person.
+                {reportTarget?.isPrevious
+                  ? `Send your previous match with ${reportTarget.partnerName} to moderation. Blocking also prevents future matches with this person.`
+                  : "Send this session to moderation. Blocking also prevents future matches with this person."}
               </DialogDescription>
             </DialogHeader>
 
@@ -1426,12 +1494,14 @@ function CallRoom() {
                     Block this person
                   </span>
                   <span className="mt-1 block text-sm text-muted-foreground">
-                    End this room and keep them out of future matches.
+                    {reportTarget?.isPrevious
+                      ? "Keep them out of future matches."
+                      : "End this room and keep them out of future matches."}
                   </span>
                 </span>
               </label>
 
-              {blockAfterReport && (
+              {blockAfterReport && !reportTarget?.isPrevious && (
                 <div className="flex gap-2 rounded-xl border border-destructive/30 bg-destructive/10 p-3 text-sm text-destructive">
                   <AlertTriangle className="mt-0.5 size-4 shrink-0" />
                   This will close the current match after the report is sent.
@@ -1450,7 +1520,10 @@ function CallRoom() {
               <Button
                 variant="destructive"
                 disabled={safetyMutation.isPending || !canUseShield}
-                onClick={() => safetyMutation.mutate()}
+                onClick={() => {
+                  if (!reportTarget) return;
+                  safetyMutation.mutate(reportTarget);
+                }}
               >
                 {safetyMutation.isPending ? (
                   <Loader2 className="size-4 animate-spin" />

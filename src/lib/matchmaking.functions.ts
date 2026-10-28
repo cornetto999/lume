@@ -63,7 +63,16 @@ const ACTIVE_SESSION_STATUSES: Array<CallSession["status"]> = [
 const SEARCH_STALE_MS = 90_000;
 const REMATCH_COOLDOWN_MS = 5_000;
 const MATCH_FINALIZING_STALE_MS = 10_000;
-const MAX_MATCH_TOPICS = 5;
+const BASIC_MATCH_TOPICS = 5;
+const MAX_MATCH_TOPICS = 8;
+const DEFAULT_CANDIDATE_POOL_LIMIT = 24;
+const PLUS_CANDIDATE_POOL_LIMIT = 48;
+const PLUS_PRIORITY_SCORE_BOOST = 160;
+const ACTIVE_PLUS_SUBSCRIPTION_STATUSES = new Set(["active", "trialing"]);
+
+type NormalizeMatchPreferencesOptions = {
+  plusEntitled?: boolean;
+};
 
 const languageValues = new Set<string>(
   LANGUAGE_OPTIONS.map((option) => option.value),
@@ -75,6 +84,13 @@ const matchPreferencesInputSchema = z
     topics: z.array(z.string().trim().min(1).max(30)).max(8).optional(),
     language: z.string().trim().min(1).max(40).optional(),
     countryMode: z.string().trim().optional(),
+    plus: z
+      .object({
+        enabled: z.boolean().optional(),
+        priorityBoost: z.boolean().optional(),
+        smartExpansion: z.boolean().optional(),
+      })
+      .optional(),
   })
   .optional();
 
@@ -117,6 +133,7 @@ function uniqueCleanStrings(values: Array<string | null | undefined>) {
 function normalizeMatchPreferences(
   input: unknown,
   profile?: Pick<Profile, "interests"> | null,
+  options: NormalizeMatchPreferencesOptions = {},
 ): MatchPreferences {
   const parsed = matchPreferencesInputSchema.safeParse(input);
   const raw = parsed.success ? parsed.data : undefined;
@@ -124,6 +141,9 @@ function normalizeMatchPreferences(
   const rawLanguage = raw?.language ?? DEFAULT_MATCH_PREFERENCES.language;
   const rawCountryMode =
     raw?.countryMode ?? DEFAULT_MATCH_PREFERENCES.countryMode;
+  const plusEnabled =
+    raw?.plus?.enabled === true && (options.plusEntitled ?? true);
+  const topicLimit = plusEnabled ? MAX_MATCH_TOPICS : BASIC_MATCH_TOPICS;
   const fallbackTopics = profile?.interests?.slice(0, 3) ?? [];
 
   return {
@@ -132,7 +152,7 @@ function normalizeMatchPreferences(
       : DEFAULT_MATCH_PREFERENCES.vibe,
     topics: uniqueCleanStrings(
       raw?.topics?.length ? raw.topics : fallbackTopics,
-    ).slice(0, MAX_MATCH_TOPICS),
+    ).slice(0, topicLimit),
     language: languageValues.has(rawLanguage)
       ? rawLanguage
       : DEFAULT_MATCH_PREFERENCES.language,
@@ -141,6 +161,11 @@ function normalizeMatchPreferences(
     )
       ? (rawCountryMode as CountryMatchMode)
       : DEFAULT_MATCH_PREFERENCES.countryMode,
+    plus: {
+      enabled: plusEnabled,
+      priorityBoost: plusEnabled && raw?.plus?.priorityBoost === true,
+      smartExpansion: plusEnabled && raw?.plus?.smartExpansion === true,
+    },
   };
 }
 
@@ -253,17 +278,54 @@ function candidateScore(
   return score;
 }
 
+function hasPriorityBoost(preferences: MatchPreferences) {
+  return preferences.plus.enabled && preferences.plus.priorityBoost;
+}
+
+function hasSmartExpansion(preferences: MatchPreferences) {
+  return preferences.plus.enabled && preferences.plus.smartExpansion;
+}
+
 function shouldRelaxSearch(queue: QueueEntry | null | undefined) {
   const joinedAt = Date.parse(queue?.joined_at ?? "");
-  return (
-    Number.isFinite(joinedAt) && Date.now() - joinedAt >= FAST_MATCH_AFTER_MS
-  );
+  const preferences = readQueuePreferences(queue);
+  const relaxAfterMs = hasSmartExpansion(preferences) ? 0 : FAST_MATCH_AFTER_MS;
+
+  return Number.isFinite(joinedAt) && Date.now() - joinedAt >= relaxAfterMs;
 }
 
 async function getSupabaseAdminClient() {
   const { getSupabaseAdmin } =
     await import("@/integrations/supabase/client.server");
   return getSupabaseAdmin();
+}
+
+function isMissingSubscriptionTable(error: {
+  code?: string;
+  message?: string;
+}) {
+  return (
+    error.code === "42P01" ||
+    error.message?.includes("user_subscriptions") === true
+  );
+}
+
+async function hasActiveLumePlusSubscription(
+  supabaseAdmin: SupabaseAdminClient,
+  userId: string,
+) {
+  const { data, error } = await supabaseAdmin
+    .from("user_subscriptions")
+    .select("status")
+    .eq("user_id", userId)
+    .maybeSingle();
+
+  if (error) {
+    if (isMissingSubscriptionTable(error)) return false;
+    throw new Error(error.message);
+  }
+
+  return ACTIVE_PLUS_SUBSCRIPTION_STATUSES.has(data?.status ?? "");
 }
 
 function isActiveSession(session: CallSession | null): session is CallSession {
@@ -621,6 +683,9 @@ async function tryCreateMatch(
   const currentProfile = currentProfileResult.data;
   const currentPreferences = readQueuePreferences(currentQueue, currentProfile);
   const relaxSearch = shouldRelaxSearch(currentQueue);
+  const candidatePoolLimit = currentPreferences.plus.enabled
+    ? PLUS_CANDIDATE_POOL_LIMIT
+    : DEFAULT_CANDIDATE_POOL_LIMIT;
 
   // Fallback path: Manual matching loop
   const { data: candidates, error } = await supabaseAdmin
@@ -631,7 +696,7 @@ async function tryCreateMatch(
     .neq("user_id", userId)
     .gte("heartbeat_at", staleCutoff)
     .order("joined_at", { ascending: true })
-    .limit(24);
+    .limit(candidatePoolLimit);
 
   if (error) throw new Error(error.message);
 
@@ -670,7 +735,11 @@ async function tryCreateMatch(
               currentPreferences,
               candidateProfile,
               candidatePreferences,
-            ) + (compatible ? 1_000 : 0)
+            ) +
+            (compatible ? 1_000 : 0) +
+            (hasPriorityBoost(candidatePreferences)
+              ? PLUS_PRIORITY_SCORE_BOOST
+              : 0)
           : -1;
 
       return {
@@ -836,7 +905,13 @@ export const startMatching = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<MatchmakingState> => {
     const supabaseAdmin = await getSupabaseAdminClient();
     const profile = await assertCanMatch(supabaseAdmin, context.userId);
-    const preferences = normalizeMatchPreferences(data, profile);
+    const plusEntitled = await hasActiveLumePlusSubscription(
+      supabaseAdmin,
+      context.userId,
+    );
+    const preferences = normalizeMatchPreferences(data, profile, {
+      plusEntitled,
+    });
 
     const existingState = await hydrateMatchState(
       supabaseAdmin,
@@ -876,7 +951,13 @@ export const findNextMatch = createServerFn({ method: "POST" })
   .handler(async ({ data, context }): Promise<MatchmakingState> => {
     const supabaseAdmin = await getSupabaseAdminClient();
     const profile = await assertCanMatch(supabaseAdmin, context.userId);
-    const preferences = normalizeMatchPreferences(data, profile);
+    const plusEntitled = await hasActiveLumePlusSubscription(
+      supabaseAdmin,
+      context.userId,
+    );
+    const preferences = normalizeMatchPreferences(data, profile, {
+      plusEntitled,
+    });
     const queue = await getOwnQueueEntry(supabaseAdmin, context.userId);
 
     await endQueueSession(

@@ -16,6 +16,7 @@ export type Block = Tables["blocks"]["Row"];
 export type Report = Tables["reports"]["Row"];
 export type Notification = Tables["notifications"]["Row"];
 export type UserDevice = Tables["user_devices"]["Row"];
+export type UserSubscription = Tables["user_subscriptions"]["Row"];
 export type ModerationAction = Tables["moderation_actions"]["Row"];
 export type AdminAuditLog = Tables["admin_audit_logs"]["Row"];
 
@@ -180,11 +181,18 @@ export const COUNTRY_MATCH_MODES = ["global", "same_country"] as const;
 
 export type CountryMatchMode = (typeof COUNTRY_MATCH_MODES)[number];
 
+export type MatchPlusPreferences = {
+  enabled: boolean;
+  priorityBoost: boolean;
+  smartExpansion: boolean;
+};
+
 export type MatchPreferences = {
   vibe: VibeOption;
   topics: string[];
   language: string;
   countryMode: CountryMatchMode;
+  plus: MatchPlusPreferences;
 };
 
 export const DEFAULT_MATCH_PREFERENCES: MatchPreferences = {
@@ -192,4 +200,9 @@ export const DEFAULT_MATCH_PREFERENCES: MatchPreferences = {
   topics: [],
   language: "Any",
   countryMode: "global",
+  plus: {
+    enabled: false,
+    priorityBoost: false,
+    smartExpansion: false,
+  },
 };
